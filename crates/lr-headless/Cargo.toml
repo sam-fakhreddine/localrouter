@@ -1,0 +1,25 @@
+[package]
+name = "lr-headless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LocalRouter without the desktop app: the HTTP server plus a web approvals page for firewall Ask decisions"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+lr-mcp = { workspace = true }
+lr-types = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true

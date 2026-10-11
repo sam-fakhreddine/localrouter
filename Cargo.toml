@@ -30,6 +30,7 @@ members = [
     "crates/lr-monitor",
     "crates/lr-responses-sessions",
     "crates/lr-proxy",
+    "crates/lr-headless",
 ]
 resolver = "2"
 

@@ -60,6 +60,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN useradd -m -u 10001 -d /data -s /usr/sbin/nologin app
 
 # Set up environment
+# Set LR_ALLOWED_HOSTS (comma-separated host names or IPs, exact match) at run
+# time to trust Host headers other than localhost, e.g. 192.168.0.212,mcp-gateway
 USER app
 WORKDIR /data
 VOLUME /data

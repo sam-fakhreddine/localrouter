@@ -5,6 +5,12 @@
 //! and the src-tauri-only modules (launcher, ui, inspection and reverse
 //! proxies, local model library and embedded engines). No event sink is set.
 //! Firewall "Ask" decisions are answered through the web approvals API.
+//!
+//! Environment: `LR_ALLOWED_HOSTS` is a comma-separated list of extra host
+//! names or IPs (no ports, no wildcards, case-insensitive) accepted in the
+//! Host header besides localhost, 127.0.0.1 and [::1]. Example:
+//! `LR_ALLOWED_HOSTS=192.168.0.212,mcp-gateway`. Unset or empty keeps the
+//! localhost-only DNS rebinding check.
 
 use std::sync::Arc;
 

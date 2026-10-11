@@ -348,7 +348,14 @@ fn build_app(state: AppState, enable_cors: bool, shutdown: CancellationToken) ->
     router = router.layer(axum::middleware::from_fn(security_headers_middleware));
 
     // Add DNS rebinding protection
-    router = router.layer(axum::middleware::from_fn(host_validation_middleware));
+    // Extra trusted Host names come from LR_ALLOWED_HOSTS, read once here.
+    let extra_hosts: Arc<Vec<String>> = Arc::new(parse_allowed_hosts(
+        std::env::var("LR_ALLOWED_HOSTS").ok().as_deref(),
+    ));
+    router = router.layer(axum::middleware::from_fn_with_state(
+        extra_hosts,
+        host_validation_middleware,
+    ));
 
     // Add CORS if enabled
     if enable_cors {
@@ -493,11 +500,43 @@ async fn serve_openapi_yaml() -> impl IntoResponse {
     }
 }
 
+/// Parse the `LR_ALLOWED_HOSTS` value: comma-separated host names or IPs.
+/// Entries are trimmed and lowercased; empty entries are dropped.
+fn parse_allowed_hosts(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or("")
+        .split(',')
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect()
+}
+
+/// True when the Host header value (with or without a port) is trusted:
+/// localhost, 127.0.0.1, [::1], or an exact (case-insensitive) match of an
+/// entry in `extra`. No wildcards.
+fn host_allowed(host: &str, extra: &[String]) -> bool {
+    let host_without_port = if host.starts_with('[') {
+        // IPv6 literal: keep the brackets, drop any ":port" after them.
+        match host.find(']') {
+            Some(end) => &host[..=end],
+            None => host,
+        }
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    let h = host_without_port.to_ascii_lowercase();
+    matches!(h.as_str(), "localhost" | "127.0.0.1" | "[::1]") || extra.iter().any(|e| e.eq_ignore_ascii_case(&h))
+}
+
 /// DNS rebinding protection middleware
 ///
-/// Validates the Host header against expected localhost values to prevent
-/// DNS rebinding attacks where an attacker's domain resolves to 127.0.0.1.
-async fn host_validation_middleware(req: Request, next: Next) -> Response {
+/// Validates the Host header against expected localhost values (plus any
+/// operator-listed `LR_ALLOWED_HOSTS`) to prevent DNS rebinding attacks where
+/// an attacker's domain resolves to 127.0.0.1.
+async fn host_validation_middleware(
+    axum::extract::State(extra): axum::extract::State<Arc<Vec<String>>>,
+    req: Request,
+    next: Next,
+) -> Response {
     use middleware::error::ApiErrorResponse;
 
     if let Some(host) = req
@@ -505,12 +544,8 @@ async fn host_validation_middleware(req: Request, next: Next) -> Response {
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
     {
-        let host_without_port = host.split(':').next().unwrap_or(host);
-        match host_without_port {
-            "localhost" | "127.0.0.1" | "[::1]" => {} // OK
-            _ => {
-                return ApiErrorResponse::forbidden("Invalid Host header").into_response();
-            }
+        if !host_allowed(host, &extra) {
+            return ApiErrorResponse::forbidden("Invalid Host header").into_response();
         }
     }
     // If no Host header, allow (some clients don't send it)

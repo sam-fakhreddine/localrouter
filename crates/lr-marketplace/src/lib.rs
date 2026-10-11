@@ -17,6 +17,7 @@ pub use types::*;
 use crate::registry::McpRegistryClient;
 use crate::skill_sources::SkillSourcesClient;
 use lr_config::MarketplaceConfig;
+use lr_types::{emit_event, EventSink};
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::future::Future;
@@ -80,8 +81,8 @@ pub struct MarketplaceService {
     /// Persistent cache
     cache: RwLock<MarketplaceCache>,
 
-    /// Optional Tauri app handle for event emission
-    app_handle: RwLock<Option<tauri::AppHandle>>,
+    /// Optional event sink for event emission
+    event_sink: RwLock<Option<EventSink>>,
 
     /// Callback for performing actual MCP server installation
     mcp_install_callback: RwLock<Option<McpInstallCallback>>,
@@ -103,7 +104,7 @@ impl MarketplaceService {
             config: RwLock::new(config),
             data_dir,
             cache: RwLock::new(cache),
-            app_handle: RwLock::new(None),
+            event_sink: RwLock::new(None),
             mcp_install_callback: RwLock::new(None),
             skill_install_callback: RwLock::new(None),
         }
@@ -130,7 +131,7 @@ impl MarketplaceService {
             config: RwLock::new(config),
             data_dir,
             cache: RwLock::new(cache),
-            app_handle: RwLock::new(None),
+            event_sink: RwLock::new(None),
             mcp_install_callback: RwLock::new(None),
             skill_install_callback: RwLock::new(None),
         }
@@ -176,9 +177,9 @@ impl MarketplaceService {
         }
     }
 
-    /// Set the Tauri app handle for event emission
-    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
-        *self.app_handle.write() = Some(handle);
+    /// Set the event sink for event emission
+    pub fn set_event_sink(&self, sink: EventSink) {
+        *self.event_sink.write() = Some(sink);
     }
 
     /// Update the marketplace config
@@ -419,9 +420,8 @@ impl MarketplaceService {
     /// Emit marketplace-changed event to frontend
     #[allow(dead_code)]
     fn emit_marketplace_changed(&self) {
-        if let Some(ref handle) = *self.app_handle.read() {
-            use tauri::Emitter;
-            if let Err(e) = handle.emit("marketplace-changed", ()) {
+        if let Some(ref sink) = *self.event_sink.read() {
+            if let Err(e) = emit_event(sink, "marketplace-changed", &()) {
                 warn!("Failed to emit marketplace-changed event: {}", e);
             }
         }
@@ -460,7 +460,7 @@ impl Clone for MarketplaceService {
             config: RwLock::new(self.config.read().clone()),
             data_dir: self.data_dir.clone(),
             cache: RwLock::new(self.cache.read().clone()),
-            app_handle: RwLock::new(self.app_handle.read().clone()),
+            event_sink: RwLock::new(self.event_sink.read().clone()),
             mcp_install_callback: RwLock::new(self.mcp_install_callback.read().clone()),
             skill_install_callback: RwLock::new(self.skill_install_callback.read().clone()),
         }

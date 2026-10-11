@@ -3,6 +3,7 @@
 use super::discovery;
 use super::types::{SkillDefinition, SkillInfo};
 use dashmap::DashMap;
+use lr_types::{emit_event, EventSink};
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,8 +15,8 @@ pub struct SkillManager {
     /// All discovered skills — readers clone the inner Arc for a snapshot
     skills: Arc<RwLock<Arc<Vec<SkillDefinition>>>>,
 
-    /// Optional Tauri app handle for event emission
-    app_handle: Option<tauri::AppHandle>,
+    /// Optional event sink for event emission
+    event_sink: Option<EventSink>,
 
     /// Extraction directories pending cleanup: path -> time superseded
     pending_cleanup: Arc<DashMap<PathBuf, Instant>>,
@@ -32,14 +33,14 @@ impl SkillManager {
     pub fn new() -> Self {
         Self {
             skills: Arc::new(RwLock::new(Arc::new(Vec::new()))),
-            app_handle: None,
+            event_sink: None,
             pending_cleanup: Arc::new(DashMap::new()),
         }
     }
 
-    /// Set the Tauri app handle for event emission
-    pub fn set_app_handle(&mut self, handle: tauri::AppHandle) {
-        self.app_handle = Some(handle);
+    /// Set the event sink for event emission
+    pub fn set_event_sink(&mut self, sink: EventSink) {
+        self.event_sink = Some(sink);
     }
 
     /// Start the background cleanup task for old extraction directories
@@ -219,9 +220,8 @@ impl SkillManager {
 
     /// Emit skills-changed event to frontend
     fn emit_skills_changed(&self) {
-        if let Some(ref handle) = self.app_handle {
-            use tauri::Emitter;
-            if let Err(e) = handle.emit("skills-changed", ()) {
+        if let Some(ref sink) = self.event_sink {
+            if let Err(e) = emit_event(sink, "skills-changed", &()) {
                 warn!("Failed to emit skills-changed event: {}", e);
             }
         }

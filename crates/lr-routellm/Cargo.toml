@@ -19,7 +19,6 @@ anyhow = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
-tauri = { workspace = true }
 reqwest = { workspace = true }
 once_cell = { workspace = true }
 tokenizers = { workspace = true }

@@ -3,6 +3,7 @@
 //! Tauri commands and system tray management.
 
 pub mod commands;
+pub mod event_sink;
 pub mod commands_clients;
 pub mod commands_coding_agents;
 pub mod commands_engines;

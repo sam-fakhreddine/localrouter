@@ -758,7 +758,7 @@ async fn run_gui_mode() -> anyhow::Result<()> {
             info!("Tauri app initialized");
 
             // Set app handle on config manager for event emission
-            config_manager.set_app_handle(app.handle().clone());
+            config_manager.set_event_sink(crate::ui::event_sink::from_app(app.handle()));
 
             // Sync the OS launch-at-login state with the config setting
             // (default on). The OS state can drift (e.g. removed via macOS
@@ -857,7 +857,7 @@ async fn run_gui_mode() -> anyhow::Result<()> {
 
             // Initialize skill manager and script executor
             let mut skill_manager = skills::SkillManager::new();
-            skill_manager.set_app_handle(app.handle().clone());
+            skill_manager.set_event_sink(crate::ui::event_sink::from_app(app.handle()));
             let skills_config = config_manager.get().skills.clone();
             skill_manager.initial_scan(&skills_config.paths, &skills_config.disabled_skills);
             skill_manager.start_cleanup_task();
@@ -1505,7 +1505,7 @@ async fn run_gui_mode() -> anyhow::Result<()> {
                 }
 
                 // Set app handle on AppState for event emission
-                app_state.set_app_handle(app.handle().clone());
+                app_state.set_event_sink(crate::ui::event_sink::from_app(app.handle()));
 
                 // Manage the MCP via LLM manager separately for Tauri command access
                 app.manage(app_state.mcp_via_llm_manager.clone());
@@ -1962,7 +1962,7 @@ async fn run_gui_mode() -> anyhow::Result<()> {
 
             // Set app handle on server state for event emission
             if let Some(state) = server_manager.get_state() {
-                state.set_app_handle(app.handle().clone());
+                state.set_event_sink(crate::ui::event_sink::from_app(app.handle()));
 
                 // Spawn background aggregation task for metrics
                 let metrics_db = state.metrics_collector.db();

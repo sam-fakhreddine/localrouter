@@ -1,10 +1,10 @@
-//! Tower-based authentication layer for Tauri HTTP compatibility
+//! Tower-based authentication layer
 
 use axum::body::Body;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tauri::http::{Request, Response, StatusCode};
+use http::{Request, Response, StatusCode};
 use tower::{Layer, Service};
 
 use crate::middleware::client_auth::{ClientAuthContext, LoggedClientId};
@@ -62,7 +62,7 @@ where
 
         Box::pin(async move {
             // Skip authentication for OPTIONS requests (CORS preflight)
-            if req.method() == tauri::http::Method::OPTIONS {
+            if req.method() == http::Method::OPTIONS {
                 return inner.call(req).await;
             }
 

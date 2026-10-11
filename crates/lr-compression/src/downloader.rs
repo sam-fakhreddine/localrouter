@@ -1,10 +1,10 @@
 //! Model downloader from HuggingFace for LLMLingua-2
 
 use hf_hub::api::tokio::Api;
+use lr_types::{emit_event, EventSink};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -29,7 +29,7 @@ pub async fn download_model(
     model_path: &Path,
     tokenizer_path: &Path,
     model_size: &str,
-    app_handle: Option<AppHandle>,
+    event_sink: Option<EventSink>,
 ) -> Result<(), String> {
     let lock_result = DOWNLOAD_LOCK.try_lock();
     if lock_result.is_err() {
@@ -51,11 +51,8 @@ pub async fn download_model(
         .await
         .map_err(|e| format!("Failed to create tokenizer directory: {}", e))?;
 
-    if let Some(ref handle) = app_handle {
-        let _ = handle.emit(
-            "compression-download-progress",
-            serde_json::json!({ "progress": 0.0, "current_file": "model.safetensors" }),
-        );
+    if let Some(ref sink) = event_sink {
+        let _ = emit_event(sink, "compression-download-progress", &serde_json::json!({ "progress": 0.0, "current_file": "model.safetensors" }));
     }
 
     let api = Api::new().map_err(|e| format!("Failed to initialize HuggingFace API: {}", e))?;
@@ -69,11 +66,8 @@ pub async fn download_model(
         .await
         .map_err(|e| format!("Failed to copy model: {}", e))?;
 
-    if let Some(ref handle) = app_handle {
-        let _ = handle.emit(
-            "compression-download-progress",
-            serde_json::json!({ "progress": 0.7, "current_file": "tokenizer.json" }),
-        );
+    if let Some(ref sink) = event_sink {
+        let _ = emit_event(sink, "compression-download-progress", &serde_json::json!({ "progress": 0.7, "current_file": "tokenizer.json" }));
     }
 
     // Download tokenizer files (BERT has vocab.txt, XLM-RoBERTa embeds vocab in tokenizer.json)
@@ -100,16 +94,13 @@ pub async fn download_model(
             .map_err(|e| format!("Failed to copy {}: {}", file, e))?;
 
         let progress = 0.7 + 0.3 * (idx + 1) as f32 / tokenizer_files.len() as f32;
-        if let Some(ref handle) = app_handle {
-            let _ = handle.emit(
-                "compression-download-progress",
-                serde_json::json!({ "progress": progress, "current_file": file }),
-            );
+        if let Some(ref sink) = event_sink {
+            let _ = emit_event(sink, "compression-download-progress", &serde_json::json!({ "progress": progress, "current_file": file }));
         }
     }
 
-    if let Some(ref handle) = app_handle {
-        let _ = handle.emit("compression-download-complete", ());
+    if let Some(ref sink) = event_sink {
+        let _ = emit_event(sink, "compression-download-complete", &());
     }
 
     info!("LLMLingua-2 model downloaded successfully");

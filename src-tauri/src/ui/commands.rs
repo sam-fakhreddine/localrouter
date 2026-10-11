@@ -4529,7 +4529,7 @@ pub async fn install_compression(
 ) -> Result<String, String> {
     let config = config_manager.get();
     let svc = ensure_compression_service(&state, &config).await?;
-    svc.download(Some(app)).await?;
+    svc.download(Some(crate::ui::event_sink::from_app(&app))).await?;
     Ok("Model downloaded successfully".to_string())
 }
 

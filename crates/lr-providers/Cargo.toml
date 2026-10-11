@@ -40,7 +40,6 @@ anyhow = { workspace = true }
 sha2 = { workspace = true }
 jsonschema = { workspace = true }
 image = { workspace = true }
-tauri = { workspace = true }
 
 tempfile = "3.8"
 wiremock = "0.6"

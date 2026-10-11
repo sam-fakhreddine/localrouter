@@ -77,7 +77,7 @@ lr-skills = { path = "crates/lr-skills" }
 lr-router = { path = "crates/lr-router" }
 lr-server = { path = "crates/lr-server" }
 lr-marketplace = { path = "crates/lr-marketplace" }
-lr-guardrails = { path = "crates/lr-guardrails", features = ["tauri-support"] }
+lr-guardrails = { path = "crates/lr-guardrails" }
 lr-coding-agents = { path = "crates/lr-coding-agents" }
 lr-compression = { path = "crates/lr-compression" }
 lr-json-repair = { path = "crates/lr-json-repair" }

@@ -5,14 +5,13 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
-use lr_types::{current_outbound_trace, RequestTrace};
+use lr_types::{current_outbound_trace, RequestTrace, emit_event, EventSink};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::Emitter;
 use tracing::{info, warn};
 
 use lr_types::{AppError, AppResult};
@@ -159,8 +158,8 @@ pub struct AccessLogger {
     /// Maximum number of days to keep logs
     retention_days: u32,
 
-    /// Optional Tauri app handle for emitting events
-    app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
+    /// Optional event sink for emitting events
+    event_sink: Arc<RwLock<Option<EventSink>>>,
 
     /// Whether access logging is enabled
     enabled: Arc<RwLock<bool>>,
@@ -185,7 +184,7 @@ impl AccessLogger {
             writer: Arc::new(Mutex::new(None)),
             current_date: Arc::new(Mutex::new(String::new())),
             retention_days,
-            app_handle: Arc::new(RwLock::new(None)),
+            event_sink: Arc::new(RwLock::new(None)),
             enabled: Arc::new(RwLock::new(enabled)),
         })
     }
@@ -204,9 +203,9 @@ impl AccessLogger {
         *self.enabled.write() = enabled;
     }
 
-    /// Set the Tauri app handle for event emission
-    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
-        *self.app_handle.write() = Some(handle);
+    /// Set the event sink for event emission
+    pub fn set_event_sink(&self, sink: EventSink) {
+        *self.event_sink.write() = Some(sink);
     }
 
     /// Get the OS-specific log directory
@@ -298,9 +297,9 @@ impl AccessLogger {
     pub fn log(&self, entry: &AccessLogEntry) -> AppResult<()> {
         // Skip logging if disabled (but still emit events for real-time UI)
         if !self.is_enabled() {
-            // Still emit Tauri event for real-time UI even when file logging is disabled
-            if let Some(handle) = self.app_handle.read().as_ref() {
-                if let Err(e) = handle.emit("llm-log-entry", entry) {
+            // Still emit event for real-time UI even when file logging is disabled
+            if let Some(sink) = self.event_sink.read().as_ref() {
+                if let Err(e) = emit_event(sink, "llm-log-entry", entry) {
                     warn!("Failed to emit LLM log event: {}", e);
                 }
             }
@@ -323,9 +322,9 @@ impl AccessLogger {
                 .map_err(|e| AppError::Internal(format!("Failed to flush log: {}", e)))?;
         }
 
-        // Emit Tauri event if app handle is available
-        if let Some(handle) = self.app_handle.read().as_ref() {
-            if let Err(e) = handle.emit("llm-log-entry", entry) {
+        // Emit event if sink is available
+        if let Some(sink) = self.event_sink.read().as_ref() {
+            if let Err(e) = emit_event(sink, "llm-log-entry", entry) {
                 warn!("Failed to emit LLM log event: {}", e);
             }
         }
@@ -458,7 +457,7 @@ mod tests {
             writer: Arc::new(Mutex::new(None)),
             current_date: Arc::new(Mutex::new(String::new())),
             retention_days: 30,
-            app_handle: Arc::new(RwLock::new(None)),
+            event_sink: Arc::new(RwLock::new(None)),
             enabled: Arc::new(RwLock::new(true)),
         };
         (logger, temp_dir)

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use lr_clients::{ClientManager, TokenStore};
+use lr_types::{emit_event, EventSink};
 use lr_config::ConfigManager;
 use lr_mcp::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use lr_mcp::{McpGateway, McpServerManager};
@@ -109,8 +110,8 @@ pub struct SseConnectionManager {
     /// Used to cancel old tasks when a new request arrives for the same client,
     /// preventing lock contention on the gateway session.
     gateway_task_handles: DashMap<String, tokio::task::AbortHandle>,
-    /// Tauri app handle for emitting connection events (optional)
-    app_handle: RwLock<Option<tauri::AppHandle>>,
+    /// Event sink for emitting connection events (optional)
+    event_sink: RwLock<Option<EventSink>>,
 }
 
 impl SseConnectionManager {
@@ -119,7 +120,7 @@ impl SseConnectionManager {
             connections: DashMap::new(),
             pending_server_requests: DashMap::new(),
             gateway_task_handles: DashMap::new(),
-            app_handle: RwLock::new(None),
+            event_sink: RwLock::new(None),
         }
     }
 
@@ -137,16 +138,15 @@ impl SseConnectionManager {
             .insert(client_id.to_string(), handle);
     }
 
-    /// Set the Tauri app handle for event emission
-    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
-        *self.app_handle.write() = Some(handle);
+    /// Set the event sink for event emission
+    pub fn set_event_sink(&self, sink: EventSink) {
+        *self.event_sink.write() = Some(sink);
     }
 
-    /// Emit an event if the app handle is available
+    /// Emit an event if the event sink is available
     fn emit_event(&self, event: &str, payload: impl serde::Serialize + Clone) {
-        if let Some(handle) = self.app_handle.read().as_ref() {
-            use tauri::Emitter;
-            let _ = handle.emit(event, payload);
+        if let Some(handle) = self.event_sink.read().as_ref() {
+            let _ = emit_event(handle, event, &payload);
         }
     }
 
@@ -789,18 +789,18 @@ pub struct AppState {
     /// MCP access logger for persistent MCP request logging
     pub mcp_access_logger: Arc<McpAccessLogger>,
 
-    /// Tauri app handle for emitting events (set after initialization)
-    pub app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
+    /// Event sink for emitting events (set after initialization)
+    pub event_sink: Arc<RwLock<Option<EventSink>>>,
 
     /// Transient secret for internal UI testing (never persisted, regenerated on startup)
-    /// Used to allow the Tauri frontend to bypass API key restrictions when testing models
+    /// Used to allow the desktop frontend to bypass API key restrictions when testing models
     pub internal_test_secret: Arc<String>,
 
     /// RouteLLM intelligent routing service
     pub routellm_service: Option<Arc<lr_routellm::RouteLLMService>>,
 
     /// Tray graph manager for real-time token visualization (optional, only in UI mode)
-    /// Behind RwLock to allow setting it after AppState creation during Tauri setup
+    /// Behind RwLock to allow setting it after AppState creation during desktop setup
     pub tray_graph_manager: Arc<RwLock<Option<Arc<dyn TokenRecorder>>>>,
 
     /// Broadcast channel for MCP server notifications
@@ -952,7 +952,7 @@ impl AppState {
             metrics_collector,
             access_logger: Arc::new(access_logger),
             mcp_access_logger: Arc::new(mcp_access_logger),
-            app_handle: Arc::new(RwLock::new(None)),
+            event_sink: Arc::new(RwLock::new(None)),
             internal_test_secret: Arc::new(internal_test_secret),
             routellm_service: None,
             tray_graph_manager: Arc::new(RwLock::new(None)),
@@ -1109,33 +1109,34 @@ impl AppState {
     }
 
     /// Get the internal test secret for UI testing
-    /// Only accessible via Tauri IPC, not exposed over HTTP
+    /// Only accessible via desktop IPC, not exposed over HTTP
     pub fn get_internal_test_secret(&self) -> String {
         (*self.internal_test_secret).clone()
     }
 
-    /// Set the Tauri app handle (called after Tauri initialization)
-    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
-        *self.app_handle.write() = Some(handle.clone());
+    /// Set the event sink (called after desktop initialization)
+    pub fn set_event_sink(&self, sink: EventSink) {
+        *self.event_sink.write() = Some(sink.clone());
 
-        // Also set app handle on loggers for event emission
-        self.access_logger.set_app_handle(handle.clone());
-        self.mcp_access_logger.set_app_handle(handle.clone());
-        // Also set app handle on health cache for event emission
-        self.health_cache.set_app_handle(handle.clone());
-        // Also set app handle on SSE connection manager for connection events
-        self.sse_connection_manager.set_app_handle(handle.clone());
-        // Also set app handle on monitor store for event emission
+        // Also set event sink on loggers for event emission
+        self.access_logger.set_event_sink(sink.clone());
+        self.mcp_access_logger.set_event_sink(sink.clone());
+        // Also set event sink on health cache for event emission
+        self.health_cache.set_event_sink(sink.clone());
+        // Also set event sink on SSE connection manager for connection events
+        self.sse_connection_manager.set_event_sink(sink.clone());
+        // Also set event sink on monitor store for event emission
         {
-            let h = handle;
+            let h = sink;
             self.monitor_store.set_emitter(move |event_name, payload| {
-                use tauri::Emitter;
-                let _ = h.emit(event_name, payload);
+                let value = serde_json::from_str(&payload)
+                    .unwrap_or(serde_json::Value::String(payload));
+                let _ = h(event_name, value);
             });
         }
     }
 
-    /// Set the tray graph manager (called after Tauri initialization when it's created)
+    /// Set the tray graph manager (called after desktop initialization when it's created)
     pub fn set_tray_graph_manager(&self, manager: Arc<dyn TokenRecorder>) {
         *self.tray_graph_manager.write() = Some(manager);
     }
@@ -1149,23 +1150,21 @@ impl AppState {
         self
     }
 
-    /// Emit an event if the app handle is available
+    /// Emit an event if the event sink is available
     pub fn emit_event(&self, event: &str, payload: &str) {
-        if let Some(handle) = self.app_handle.read().as_ref() {
-            use tauri::Emitter;
-            let _ = handle.emit(event, payload);
+        if let Some(handle) = self.event_sink.read().as_ref() {
+            let _ = emit_event(handle, event, &payload);
         }
     }
 
     /// Record client activity (HTTP request, SSE connection, etc.)
     /// Emits a "client-activity" event with the client ID
     pub fn record_client_activity(&self, client_id: &str) {
-        if let Some(handle) = self.app_handle.read().as_ref() {
-            use tauri::Emitter;
+        if let Some(handle) = self.event_sink.read().as_ref() {
             tracing::debug!("Emitting client-activity event for client: {}", client_id);
-            let _ = handle.emit("client-activity", client_id.to_string());
+            let _ = emit_event(handle, "client-activity", &client_id.to_string());
         } else {
-            tracing::warn!("Cannot emit client-activity: app_handle not set");
+            tracing::warn!("Cannot emit client-activity: event_sink not set");
         }
     }
 }

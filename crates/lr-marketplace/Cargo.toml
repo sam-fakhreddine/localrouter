@@ -23,7 +23,6 @@ dashmap = { workspace = true }
 reqwest = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-tauri = { workspace = true }
 urlencoding = { workspace = true }
 
 [dev-dependencies]

@@ -11,10 +11,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::Emitter;
 use tracing::{info, warn};
 
-use lr_types::{AppError, AppResult};
+use lr_types::{emit_event, AppError, AppResult, EventSink};
 
 use super::logger::AccessLogger;
 
@@ -124,8 +123,8 @@ pub struct McpAccessLogger {
     /// Maximum number of days to keep logs
     retention_days: u32,
 
-    /// Optional Tauri app handle for emitting events
-    app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
+    /// Optional event sink for emitting events
+    event_sink: Arc<RwLock<Option<EventSink>>>,
 
     /// Whether access logging is enabled
     enabled: Arc<RwLock<bool>>,
@@ -151,7 +150,7 @@ impl McpAccessLogger {
             writer: Arc::new(Mutex::new(None)),
             current_date: Arc::new(Mutex::new(String::new())),
             retention_days,
-            app_handle: Arc::new(RwLock::new(None)),
+            event_sink: Arc::new(RwLock::new(None)),
             enabled: Arc::new(RwLock::new(enabled)),
         })
     }
@@ -170,9 +169,9 @@ impl McpAccessLogger {
         *self.enabled.write() = enabled;
     }
 
-    /// Set the Tauri app handle for event emission
-    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
-        *self.app_handle.write() = Some(handle);
+    /// Set the event sink for event emission
+    pub fn set_event_sink(&self, sink: EventSink) {
+        *self.event_sink.write() = Some(sink);
     }
 
     /// Get the OS-specific log directory (shared with LLM logs)
@@ -223,9 +222,9 @@ impl McpAccessLogger {
     pub fn log(&self, entry: &McpAccessLogEntry) -> AppResult<()> {
         // Skip logging if disabled (but still emit events for real-time UI)
         if !self.is_enabled() {
-            // Still emit Tauri event for real-time UI even when file logging is disabled
-            if let Some(handle) = self.app_handle.read().as_ref() {
-                if let Err(e) = handle.emit("mcp-log-entry", entry) {
+            // Still emit event for real-time UI even when file logging is disabled
+            if let Some(sink) = self.event_sink.read().as_ref() {
+                if let Err(e) = emit_event(sink, "mcp-log-entry", entry) {
                     warn!("Failed to emit MCP log event: {}", e);
                 }
             }
@@ -248,9 +247,9 @@ impl McpAccessLogger {
                 .map_err(|e| AppError::Internal(format!("Failed to flush MCP log: {}", e)))?;
         }
 
-        // Emit Tauri event if app handle is available
-        if let Some(handle) = self.app_handle.read().as_ref() {
-            if let Err(e) = handle.emit("mcp-log-entry", entry) {
+        // Emit event if event sink is available
+        if let Some(sink) = self.event_sink.read().as_ref() {
+            if let Err(e) = emit_event(sink, "mcp-log-entry", entry) {
                 warn!("Failed to emit MCP log event: {}", e);
             }
         }

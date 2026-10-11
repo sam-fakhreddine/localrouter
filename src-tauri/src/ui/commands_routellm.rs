@@ -109,7 +109,11 @@ pub async fn routellm_download_models(
     let (model_path, tokenizer_path) = service.get_paths();
 
     // Use the downloader module (downloads SafeTensors from HuggingFace)
-    lr_routellm::downloader::download_models(&model_path, &tokenizer_path, Some(app_handle))
+    lr_routellm::downloader::download_models(
+        &model_path,
+        &tokenizer_path,
+        Some(crate::ui::event_sink::from_app(&app_handle)),
+    )
         .await
         .map_err(|e| e.to_string())?;
 

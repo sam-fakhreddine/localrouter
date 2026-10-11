@@ -5,10 +5,10 @@
 use crate::errors::{RouteLLMError, RouteLLMResult};
 use hf_hub::api::tokio::Api;
 use lr_config::RouteLLMDownloadStatus;
+use lr_types::{emit_event, EventSink};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -190,11 +190,11 @@ fn check_disk_space(path: &Path) -> RouteLLMResult<u64> {
 /// # Arguments
 /// * `model_path` - Directory where model.safetensors will be saved
 /// * `tokenizer_path` - Directory where tokenizer files will be saved
-/// * `app_handle` - Optional Tauri app handle for progress events
+/// * `event_sink` - Optional event sink for progress events
 pub async fn download_models(
     model_path: &Path,
     tokenizer_path: &Path,
-    app_handle: Option<AppHandle>,
+    event_sink: Option<EventSink>,
 ) -> RouteLLMResult<()> {
     // Try to acquire download lock (non-blocking check)
     let lock_result = DOWNLOAD_LOCK.try_lock();
@@ -237,10 +237,11 @@ pub async fn download_models(
         );
         warn!("{}", error_msg);
 
-        if let Some(ref handle) = app_handle {
-            let _ = handle.emit(
+        if let Some(ref sink) = event_sink {
+            let _ = emit_event(
+                sink,
                 "routellm-download-failed",
-                DownloadError {
+                &DownloadError {
                     error: error_msg.clone(),
                 },
             );
@@ -281,10 +282,11 @@ pub async fn download_models(
         })?;
 
     // Emit initial progress event
-    if let Some(ref handle) = app_handle {
-        let _ = handle.emit(
+    if let Some(ref sink) = event_sink {
+        let _ = emit_event(
+            sink,
             "routellm-download-progress",
-            DownloadProgress {
+            &DownloadProgress {
                 current_file: Some("model.safetensors".to_string()),
                 progress: 0.0,
                 total_bytes: 440_000_000, // ~440 MB
@@ -355,10 +357,11 @@ pub async fn download_models(
                 warn!("{}", error_msg);
 
                 // Emit failure event
-                if let Some(ref handle) = app_handle {
-                    let _ = handle.emit(
+                if let Some(ref sink) = event_sink {
+                    let _ = emit_event(
+                        sink,
                         "routellm-download-failed",
-                        DownloadError {
+                        &DownloadError {
                             error: error_msg.clone(),
                         },
                     );
@@ -381,10 +384,11 @@ pub async fn download_models(
     info!("Model downloaded to temporary location");
 
     // Emit progress (70% complete)
-    if let Some(ref handle) = app_handle {
-        let _ = handle.emit(
+    if let Some(ref sink) = event_sink {
+        let _ = emit_event(
+            sink,
             "routellm-download-progress",
-            DownloadProgress {
+            &DownloadProgress {
                 current_file: Some("tokenizer.json".to_string()),
                 progress: 0.7,
                 total_bytes: 440_000_000,
@@ -451,10 +455,11 @@ pub async fn download_models(
                     );
                     warn!("{}", error_msg);
 
-                    if let Some(ref handle) = app_handle {
-                        let _ = handle.emit(
+                    if let Some(ref sink) = event_sink {
+                        let _ = emit_event(
+                            sink,
                             "routellm-download-failed",
-                            DownloadError {
+                            &DownloadError {
                                 error: error_msg.clone(),
                             },
                         );
@@ -474,10 +479,11 @@ pub async fn download_models(
 
         // Update progress
         let progress = 0.7 + (0.3 * (idx + 1) as f32 / tokenizer_files.len() as f32);
-        if let Some(ref handle) = app_handle {
-            let _ = handle.emit(
+        if let Some(ref sink) = event_sink {
+            let _ = emit_event(
+                sink,
                 "routellm-download-progress",
-                DownloadProgress {
+                &DownloadProgress {
                     current_file: Some(file.to_string()),
                     progress,
                     total_bytes: 440_000_000,
@@ -505,10 +511,11 @@ pub async fn download_models(
         tokio::fs::remove_dir_all(&temp_tokenizer_path).await.ok();
 
         // Emit failure event
-        if let Some(ref handle) = app_handle {
-            let _ = handle.emit(
+        if let Some(ref sink) = event_sink {
+            let _ = emit_event(
+                sink,
                 "routellm-download-failed",
-                DownloadError {
+                &DownloadError {
                     error: error_msg.clone(),
                 },
             );
@@ -555,8 +562,8 @@ pub async fn download_models(
     info!("Models moved to final location successfully");
 
     // Emit completion
-    if let Some(ref handle) = app_handle {
-        let _ = handle.emit("routellm-download-complete", ());
+    if let Some(ref sink) = event_sink {
+        let _ = emit_event(sink, "routellm-download-complete", &());
     }
 
     info!("RouteLLM models downloaded and verified successfully from HuggingFace");

@@ -21,7 +21,6 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 zip = { workspace = true }
 anyhow = { workspace = true }
-tauri = { workspace = true }
 dashmap = { workspace = true }
 serde_yaml = { workspace = true }
 

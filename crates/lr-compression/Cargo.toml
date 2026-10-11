@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Prompt compression via LLMLingua-2 (Candle) for reducing input tokens"
 
 [dependencies]
+lr-types = { workspace = true }
 lr-config = { workspace = true }
 lr-utils = { workspace = true }
 serde = { workspace = true }
@@ -20,7 +21,6 @@ tokenizers = { workspace = true }
 hf-hub = { workspace = true }
 safetensors = { workspace = true }
 reqwest = { workspace = true }
-tauri = { workspace = true }
 once_cell = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

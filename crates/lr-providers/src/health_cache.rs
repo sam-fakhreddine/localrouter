@@ -5,13 +5,13 @@
 //! triggering health checks on every request.
 
 use chrono::{DateTime, Utc};
+use lr_types::{emit_event, EventSink};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
 use tokio::sync::Notify;
 use tracing::{debug, info};
 
@@ -182,8 +182,8 @@ impl Default for HealthCacheState {
 pub struct HealthCacheManager {
     /// Cached health state
     cache: Arc<RwLock<HealthCacheState>>,
-    /// Tauri app handle for emitting events (set after app initialization)
-    app_handle: Arc<RwLock<Option<AppHandle>>>,
+    /// Event sink for emitting events (set after app initialization)
+    event_sink: Arc<RwLock<Option<EventSink>>>,
     /// Tracks when each provider was last marked unhealthy (for debounce)
     last_marked_unhealthy: Arc<RwLock<HashMap<String, Instant>>>,
     /// Notifier for recovery task - signaled when a provider is marked unhealthy
@@ -197,16 +197,16 @@ impl HealthCacheManager {
     pub fn new() -> Self {
         Self {
             cache: Arc::new(RwLock::new(HealthCacheState::default())),
-            app_handle: Arc::new(RwLock::new(None)),
+            event_sink: Arc::new(RwLock::new(None)),
             last_marked_unhealthy: Arc::new(RwLock::new(HashMap::new())),
             recovery_notify: Arc::new(Notify::new()),
             periodic_enabled: Arc::new(AtomicBool::new(true)),
         }
     }
 
-    /// Set the Tauri app handle for event emission
-    pub fn set_app_handle(&self, handle: AppHandle) {
-        *self.app_handle.write() = Some(handle);
+    /// Set the event sink for event emission
+    pub fn set_event_sink(&self, sink: EventSink) {
+        *self.event_sink.write() = Some(sink);
     }
 
     /// Get the current cached health state
@@ -441,9 +441,9 @@ impl HealthCacheManager {
 
     /// Emit health-status-changed event to frontend
     fn emit_status_changed(&self) {
-        if let Some(handle) = self.app_handle.read().as_ref() {
+        if let Some(sink) = self.event_sink.read().as_ref() {
             let state = self.cache.read().clone();
-            if let Err(e) = handle.emit("health-status-changed", &state) {
+            if let Err(e) = emit_event(sink, "health-status-changed", &state) {
                 tracing::error!("Failed to emit health-status-changed event: {}", e);
             }
         }
@@ -460,7 +460,7 @@ impl Clone for HealthCacheManager {
     fn clone(&self) -> Self {
         Self {
             cache: self.cache.clone(),
-            app_handle: self.app_handle.clone(),
+            event_sink: self.event_sink.clone(),
             last_marked_unhealthy: self.last_marked_unhealthy.clone(),
             recovery_notify: self.recovery_notify.clone(),
             periodic_enabled: self.periodic_enabled.clone(),

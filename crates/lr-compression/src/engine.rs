@@ -63,12 +63,12 @@ impl CompressionService {
     }
 
     /// Download the model from HuggingFace
-    pub async fn download(&self, app_handle: Option<tauri::AppHandle>) -> Result<(), String> {
+    pub async fn download(&self, event_sink: Option<lr_types::EventSink>) -> Result<(), String> {
         downloader::download_model(
             &self.model_path,
             &self.tokenizer_path,
             &self.config.model_size,
-            app_handle,
+            event_sink,
         )
         .await
     }

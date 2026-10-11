@@ -6,12 +6,11 @@
 #![allow(dead_code)]
 
 use chrono::Utc;
-use lr_types::{AppError, AppResult};
+use lr_types::{AppError, AppResult, emit_event, EventSink};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, error, info};
 use uuid::Uuid;
@@ -32,20 +31,20 @@ pub type ClientSyncCallback = Arc<dyn Fn(Vec<Client>) + Send + Sync>;
 pub struct ConfigManager {
     config: Arc<RwLock<AppConfig>>,
     config_path: PathBuf,
-    app_handle: Option<AppHandle>,
+    event_sink: Option<EventSink>,
     /// Optional callback to sync clients to ClientManager when config changes
     client_sync_callback: Option<ClientSyncCallback>,
     /// Mutex to serialize disk writes, preventing concurrent save races
     save_mutex: Arc<AsyncMutex<()>>,
 }
 
-// Manual Debug implementation since AppHandle doesn't implement Debug
+// Manual Debug implementation since EventSink doesn't implement Debug
 impl std::fmt::Debug for ConfigManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConfigManager")
             .field("config", &self.config)
             .field("config_path", &self.config_path)
-            .field("app_handle", &self.app_handle.is_some())
+            .field("event_sink", &self.event_sink.is_some())
             .field("client_sync_callback", &self.client_sync_callback.is_some())
             .field("save_mutex", &"AsyncMutex<()>")
             .finish()
@@ -58,7 +57,7 @@ impl Clone for ConfigManager {
         Self {
             config: self.config.clone(),
             config_path: self.config_path.clone(),
-            app_handle: self.app_handle.clone(),
+            event_sink: self.event_sink.clone(),
             client_sync_callback: self.client_sync_callback.clone(),
             save_mutex: self.save_mutex.clone(),
         }
@@ -71,7 +70,7 @@ impl ConfigManager {
         Self {
             config: Arc::new(RwLock::new(config)),
             config_path,
-            app_handle: None,
+            event_sink: None,
             client_sync_callback: None,
             save_mutex: Arc::new(AsyncMutex::new(())),
         }
@@ -90,12 +89,12 @@ impl ConfigManager {
         Ok(Self::new(config, path))
     }
 
-    /// Set the Tauri app handle for event emission
+    /// Set the event sink for event emission
     ///
     /// This enables the config manager to emit events to the frontend when the config changes.
     /// Call this during app setup, after the ConfigManager is created.
-    pub fn set_app_handle(&mut self, app_handle: AppHandle) {
-        self.app_handle = Some(app_handle);
+    pub fn set_event_sink(&mut self, sink: EventSink) {
+        self.event_sink = Some(sink);
     }
 
     /// Set a callback to sync clients when config changes
@@ -124,7 +123,7 @@ impl ConfigManager {
     pub fn start_watching(&self) -> AppResult<RecommendedWatcher> {
         let config_path = self.config_path.clone();
         let config_arc = self.config.clone();
-        let app_handle = self.app_handle.clone();
+        let event_sink = self.event_sink.clone();
 
         // Capture the Tokio runtime handle for spawning tasks from the file watcher thread
         let runtime_handle = tokio::runtime::Handle::current();
@@ -140,7 +139,7 @@ impl ConfigManager {
                             // Reload config from disk (blocking operation in event handler)
                             let config_path_clone = config_path.clone();
                             let config_arc_clone = config_arc.clone();
-                            let app_handle_clone = app_handle.clone();
+                            let event_sink_clone = event_sink.clone();
 
                             // Use the captured runtime handle to spawn the task
                             runtime_handle.spawn(async move {
@@ -152,9 +151,9 @@ impl ConfigManager {
                                         info!("Configuration reloaded successfully");
 
                                         // Emit event to frontend
-                                        if let Some(handle) = app_handle_clone {
+                                        if let Some(sink) = event_sink_clone {
                                             if let Err(e) =
-                                                handle.emit("config-changed", &new_config)
+                                                emit_event(&sink, "config-changed", &new_config)
                                             {
                                                 error!(
                                                     "Failed to emit config-changed event: {}",
@@ -257,8 +256,8 @@ impl ConfigManager {
 
     /// Emit config-changed event to frontend
     fn emit_config_changed(&self, config: &AppConfig) {
-        if let Some(ref handle) = self.app_handle {
-            if let Err(e) = handle.emit("config-changed", config) {
+        if let Some(ref sink) = self.event_sink {
+            if let Err(e) = emit_event(sink, "config-changed", config) {
                 error!("Failed to emit config-changed event: {}", e);
             } else {
                 debug!("Emitted config-changed event to frontend");

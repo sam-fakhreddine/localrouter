@@ -1,11 +1,13 @@
 //! Shared types, error types, and traits for LocalRouter
 
 pub mod errors;
+pub mod events;
 pub mod fuzzy;
 pub mod mcp_types;
 pub mod trace;
 
 pub use errors::{AppError, AppResult};
+pub use events::{emit_event, EventSink};
 pub use mcp_types::McpTool;
 pub use trace::{
     current_outbound_trace, is_duplicate_hop, spawn_traced, with_outbound_trace, RequestTrace,

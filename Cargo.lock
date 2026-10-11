@@ -5437,6 +5437,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lr-headless"
+version = "0.0.147"
+dependencies = [
+ "axum 0.8.8",
+ "http-body-util",
+ "lr-mcp",
+ "lr-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "lr-json-repair"
 version = "0.0.147"
 dependencies = [

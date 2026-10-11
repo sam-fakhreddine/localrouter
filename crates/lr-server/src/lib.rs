@@ -827,3 +827,76 @@ mod kill_switch_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod host_allowed_tests {
+    use super::*;
+
+    fn extras(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    // Catches: the built-in loopback names being dropped or breaking when a port is present.
+    #[test]
+    fn loopback_hosts_allowed_with_and_without_port() {
+        for h in [
+            "localhost",
+            "localhost:3625",
+            "127.0.0.1",
+            "127.0.0.1:3625",
+            "[::1]",
+            "[::1]:3625",
+        ] {
+            assert!(host_allowed(h, &[]), "{h} should be allowed");
+        }
+    }
+
+    // Catches: a LAN IP being accepted when the operator listed nothing.
+    #[test]
+    fn lan_ip_rejected_without_extras() {
+        assert!(!host_allowed("192.168.0.212:3625", &[]));
+    }
+
+    // Catches: a listed IP still being rejected (the 403 this feature fixes).
+    #[test]
+    fn lan_ip_allowed_when_listed() {
+        assert!(host_allowed(
+            "192.168.0.212:3625",
+            &extras(&["192.168.0.212"])
+        ));
+    }
+
+    // Catches: a Docker network name being trusted without being listed.
+    #[test]
+    fn docker_name_allowed_only_when_listed() {
+        assert!(!host_allowed("mcp-gateway:3625", &[]));
+        assert!(host_allowed("mcp-gateway:3625", &extras(&["mcp-gateway"])));
+        assert!(host_allowed("mcp-gateway", &extras(&["mcp-gateway"])));
+    }
+
+    // Catches: setting extras turning the check off for unlisted hosts.
+    #[test]
+    fn unlisted_host_rejected_even_with_extras() {
+        assert!(!host_allowed(
+            "evil.example",
+            &extras(&["192.168.0.212", "mcp-gateway"])
+        ));
+    }
+
+    // Catches: case-sensitive matching of host names (Host headers are case-insensitive).
+    #[test]
+    fn match_is_case_insensitive() {
+        assert!(host_allowed("MCP-Gateway:3625", &extras(&["mcp-gateway"])));
+        assert!(host_allowed("mcp-gateway", &extras(&["MCP-GATEWAY"])));
+        assert!(host_allowed("LOCALHOST", &[]));
+    }
+
+    // Catches: prefix or suffix matching instead of exact matching.
+    #[test]
+    fn prefix_trick_rejected() {
+        let e = extras(&["192.168.0.212"]);
+        assert!(!host_allowed("192.168.0.2120", &e));
+        assert!(!host_allowed("192.168.0.2120:3625", &e));
+        assert!(!host_allowed("x192.168.0.212", &e));
+    }
+}

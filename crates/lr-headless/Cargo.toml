@@ -8,6 +8,10 @@ description = "LocalRouter without the desktop app: the HTTP server plus a web a
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "lr-headless"
+path = "src/main.rs"
+
 [dependencies]
 lr-mcp = { workspace = true }
 lr-types = { workspace = true }
@@ -16,6 +20,35 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+lr-api-keys = { workspace = true }
+lr-catalog = { workspace = true }
+lr-clients = { workspace = true }
+lr-coding-agents = { workspace = true }
+lr-compression = { workspace = true }
+lr-config = { workspace = true }
+lr-context = { workspace = true }
+lr-embeddings = { workspace = true }
+lr-engines = { workspace = true }
+lr-guardrails = { workspace = true }
+lr-json-repair = { workspace = true }
+lr-local-models = { workspace = true }
+lr-marketplace = { workspace = true }
+lr-mcp-via-llm = { workspace = true }
+lr-memory = { workspace = true }
+lr-monitoring = { workspace = true }
+lr-monitor = { workspace = true }
+lr-oauth = { workspace = true }
+lr-providers = { workspace = true }
+lr-proxy = { workspace = true }
+lr-routellm = { workspace = true }
+lr-router = { workspace = true }
+lr-secret-scanner = { workspace = true }
+lr-server = { workspace = true }
+lr-skills = { workspace = true }
+lr-utils = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }

@@ -2,9 +2,17 @@
 # the Dockerfile, not copied from the host. The only files that actually
 # need to be in context are the Dockerfile itself and docker-entrypoint.sh.
 # Exclude everything else aggressively.
+#
+# Exception: Dockerfile.headless compiles from source, so it needs Cargo files
+# and the source crates directory.
 
 *
 
 !Dockerfile
+!Dockerfile.headless
 !docker-entrypoint.sh
 !.dockerignore
+!Cargo.toml
+!Cargo.lock
+!crates/
+!src-tauri/

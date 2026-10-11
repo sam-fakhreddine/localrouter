@@ -1,0 +1,77 @@
+# LocalRouter headless server (lr-headless binary).
+# Lightweight runtime without Tauri, WebKit, or GTK.
+# Build: docker build -f Dockerfile.headless -t lr-headless .
+
+# ============================================================================
+# Builder: Compile lr-headless
+# ============================================================================
+FROM rust@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS builder
+
+WORKDIR /src
+
+# Copy source
+COPY . .
+
+# Build with cargo, using BuildKit cache mounts for faster rebuilds
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p lr-headless && \
+    cp target/release/lr-headless /usr/local/bin/lr-headless
+
+# ============================================================================
+# Runtime: Minimal Debian image with only essentials
+# ============================================================================
+FROM debian@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+
+# Install minimal runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the compiled binary
+COPY --from=builder /usr/local/bin/lr-headless /usr/local/bin/lr-headless
+
+# Entrypoint: ensure settings.yaml exists with required defaults
+RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
+#!/bin/sh
+set -e
+
+CONFIG_DIR="${HOME}/.localrouter"
+CONFIG_FILE="${CONFIG_DIR}/settings.yaml"
+
+if [ ! -f "${CONFIG_FILE}" ]; then
+    mkdir -p "${CONFIG_DIR}"
+    cat > "${CONFIG_FILE}" <<'YAML'
+server:
+  host: 0.0.0.0
+  port: 3625
+  enable_cors: false
+YAML
+    echo "entrypoint: wrote default ${CONFIG_FILE} (host=0.0.0.0)"
+fi
+
+exec lr-headless "$@"
+EOF
+
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Create non-root user
+RUN useradd -m -u 10001 -d /data -s /usr/sbin/nologin app
+
+# Set up environment
+USER app
+WORKDIR /data
+VOLUME /data
+ENV HOME=/data \
+    LOCALROUTER_KEYCHAIN=file \
+    LR_APPROVALS_ADDR=0.0.0.0:3626
+
+# Expose ports
+EXPOSE 3625 3626
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:3625/health || exit 1

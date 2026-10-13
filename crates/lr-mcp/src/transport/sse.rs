@@ -59,6 +59,10 @@ pub struct SseTransport {
     /// If None, falls back to using `url` for POST requests
     message_endpoint: Arc<RwLock<Option<String>>>,
 
+    /// Session id from the `Mcp-Session-Id` header of the initialize response
+    /// (Streamable HTTP, spec 2025-06-18). Sent on every later request.
+    session_id: Arc<RwLock<Option<String>>>,
+
     /// HTTP client for sending requests
     client: Client,
 
@@ -229,6 +233,7 @@ impl SseTransport {
         let request_callback: Arc<RwLock<Option<crate::transport::RequestCallback>>> =
             Arc::new(RwLock::new(None));
         let message_endpoint = Arc::new(RwLock::new(None));
+        let session_id: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
 
         // Start persistent SSE stream in background
         let stream_url = url.clone();
@@ -240,6 +245,7 @@ impl SseTransport {
         let stream_request_callback = request_callback.clone();
         let stream_client = client.clone();
         let stream_message_endpoint = message_endpoint.clone();
+        let stream_session_id = session_id.clone();
 
         let stream_task = tokio::spawn(async move {
             Self::sse_stream_task(
@@ -252,6 +258,7 @@ impl SseTransport {
                 stream_callback,
                 stream_request_callback,
                 stream_message_endpoint,
+                stream_session_id,
             )
             .await;
         });
@@ -295,6 +302,7 @@ impl SseTransport {
         let transport = Self {
             url,
             message_endpoint,
+            session_id,
             client,
             headers,
             pending,
@@ -329,6 +337,7 @@ impl SseTransport {
         notification_callback: Arc<RwLock<Option<SseNotificationCallback>>>,
         request_callback: Arc<RwLock<Option<crate::transport::RequestCallback>>>,
         message_endpoint: Arc<RwLock<Option<String>>>,
+        session_id: Arc<RwLock<Option<String>>>,
     ) {
         tracing::info!("Starting persistent SSE stream task for: {}", url);
 
@@ -363,6 +372,9 @@ impl SseTransport {
                 request = request.header(key, value);
             }
             request = request.header("Accept", "text/event-stream");
+            if let Some(id) = session_id.read().clone() {
+                request = request.header("Mcp-Session-Id", id);
+            }
 
             // Send request and get streaming response
             let response = match request.send().await {
@@ -725,6 +737,9 @@ impl Transport for SseTransport {
             for (key, value) in &self.headers {
                 req_builder = req_builder.header(key, value);
             }
+            if let Some(id) = self.session_id.read().clone() {
+                req_builder = req_builder.header("Mcp-Session-Id", id);
+            }
 
             // Send POST request (fire and forget)
             let post_response = req_builder
@@ -797,6 +812,11 @@ impl Transport for SseTransport {
             req_builder = req_builder.header(key, value);
         }
 
+        // Add the session id the server handed out on initialize
+        if let Some(id) = self.session_id.read().clone() {
+            req_builder = req_builder.header("Mcp-Session-Id", id);
+        }
+
         tracing::debug!(
             "SSE POST request: url={}, method={}, headers={:?}",
             post_url,
@@ -810,6 +830,15 @@ impl Transport for SseTransport {
             self.pending.write().remove(&request_id);
             AppError::Mcp(format!("Failed to send request: {}", e))
         })?;
+
+        // Remember the session id before any status or body check
+        if let Some(id) = post_response
+            .headers()
+            .get("Mcp-Session-Id")
+            .and_then(|v| v.to_str().ok())
+        {
+            *self.session_id.write() = Some(id.to_string());
+        }
 
         // Check POST status (should be 202 Accepted or 200 OK)
         if !post_response.status().is_success() {
@@ -1081,6 +1110,7 @@ mod tests {
         let transport = SseTransport {
             url: "http://localhost:3000".to_string(),
             message_endpoint: Arc::new(RwLock::new(None)),
+            session_id: Arc::new(RwLock::new(None)),
             client: Client::new(),
             headers: HashMap::new(),
             pending: Arc::new(RwLock::new(HashMap::new())),

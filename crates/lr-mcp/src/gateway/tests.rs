@@ -345,3 +345,150 @@ mod tests {
         assert_eq!(original, "pr_template");
     }
 }
+
+/// Gateway tests against a real stdio MCP upstream (a tiny python server).
+#[cfg(test)]
+mod lazy_tools_call_tests {
+    use crate::gateway::types::GatewayConfig;
+    use crate::gateway::McpGateway;
+    use crate::manager::McpServerManager;
+    use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+    use lr_config::{
+        AppConfig, ConfigManager, McpServerConfig, McpTransportConfig, McpTransportType,
+    };
+    use lr_providers::registry::ProviderRegistry;
+    use lr_router::free_tier::FreeTierManager;
+    use lr_router::rate_limit::RateLimiterManager;
+    use lr_router::Router;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const UPSTREAM_PY: &str = r#"
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if "id" not in msg:
+        continue
+    if method == "initialize":
+        res = {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "1"}}
+    elif method == "tools/list":
+        res = {"tools": [{"name": "web_search", "description": "search", "inputSchema": {"type": "object", "properties": {}}}]}
+    elif method == "tools/call":
+        res = {"content": [{"type": "text", "text": "upstream-result:" + msg["params"]["name"]}], "isError": False}
+    else:
+        res = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}) + "\n")
+    sys.stdout.flush()
+"#;
+
+    struct Env {
+        gateway: McpGateway,
+        server_id: String,
+    }
+
+    async fn setup() -> Env {
+        let dir = std::env::temp_dir().join(format!("lr-lazy-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("upstream.py");
+        std::fs::write(&script, UPSTREAM_PY).unwrap();
+
+        let manager = Arc::new(McpServerManager::new_for_test());
+        let config = McpServerConfig::new(
+            "web".to_string(),
+            McpTransportType::Stdio,
+            McpTransportConfig::Stdio {
+                command: format!("python3 -u {}", script.display()),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+        );
+        let server_id = config.id.clone();
+        manager.add_config(config);
+
+        let config_manager = Arc::new(ConfigManager::new(
+            AppConfig::default(),
+            dir.join("config.yaml"),
+        ));
+        let metrics_db = Arc::new(
+            lr_monitoring::storage::MetricsDatabase::new(dir.join("metrics")).unwrap(),
+        );
+        let metrics = Arc::new(lr_monitoring::metrics::MetricsCollector::new(metrics_db));
+        let router = Arc::new(Router::new(
+            config_manager,
+            Arc::new(ProviderRegistry::new()),
+            Arc::new(RateLimiterManager::new(None)),
+            metrics,
+            Arc::new(FreeTierManager::new(None)),
+        ));
+        let gateway = McpGateway::new(manager, GatewayConfig::default(), router);
+        Env { gateway, server_id }
+    }
+
+    async fn send(env: &Env, id: Option<u64>, method: &str, params: Option<Value>) -> JsonRpcResponse {
+        let request = JsonRpcRequest::new(id.map(|i| json!(i)), method.to_string(), params);
+        env.gateway
+            .handle_request("client-lazy", vec![env.server_id.clone()], vec![], request)
+            .await
+            .expect("gateway request failed")
+    }
+
+    async fn init(env: &Env) {
+        let r = send(
+            env,
+            Some(1),
+            "initialize",
+            Some(json!({"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})),
+        )
+        .await;
+        assert!(r.error.is_none(), "initialize failed: {:?}", r.error);
+        send(env, None, "notifications/initialized", None).await;
+    }
+
+    // Catches: tools/call without a prior tools/list returning tool_not_found
+    // instead of fetching the upstream tools once and calling the tool.
+    #[tokio::test]
+    async fn tools_call_without_prior_list_reaches_upstream() {
+        let env = setup().await;
+        init(&env).await;
+
+        let r = send(
+            &env,
+            Some(2),
+            "tools/call",
+            Some(json!({"name": "web__web_search", "arguments": {}})),
+        )
+        .await;
+
+        assert!(r.error.is_none(), "unexpected error: {:?}", r.error);
+        let text = r.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(text, "upstream-result:web_search");
+    }
+
+    // Catches: an unknown tool name being accepted, or erroring with something
+    // other than tool_not_found, after the lazy fetch.
+    #[tokio::test]
+    async fn tools_call_unknown_name_after_fetch_is_tool_not_found() {
+        let env = setup().await;
+        init(&env).await;
+
+        let r = send(
+            &env,
+            Some(2),
+            "tools/call",
+            Some(json!({"name": "web__no_such_tool", "arguments": {}})),
+        )
+        .await;
+
+        let err = r.error.expect("expected an error");
+        assert_eq!(err.message, "Tool not found: web__no_such_tool");
+    }
+}

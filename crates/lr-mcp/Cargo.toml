@@ -53,3 +53,6 @@ jsonschema = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+lr-monitoring = { workspace = true }

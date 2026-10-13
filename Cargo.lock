@@ -5560,6 +5560,7 @@ dependencies = [
  "lr-marketplace",
  "lr-memory",
  "lr-monitor",
+ "lr-monitoring",
  "lr-oauth",
  "lr-providers",
  "lr-router",

@@ -1142,4 +1142,17 @@ mod tests {
         assert!(json.contains("\"jsonrpc\":\"2.0\""));
         assert!(json.contains("\"method\":\"test_method\""));
     }
+
+    // Catches: treating a 400 on the opening GET (FastMCP, no session id yet) as a hard
+    // failure and retrying, instead of using inline POST responses like for 405 and 404
+    #[test]
+    fn test_get_stream_unsupported_statuses() {
+        use reqwest::StatusCode;
+        assert!(get_stream_unsupported(StatusCode::METHOD_NOT_ALLOWED));
+        assert!(get_stream_unsupported(StatusCode::NOT_FOUND));
+        assert!(get_stream_unsupported(StatusCode::BAD_REQUEST));
+        assert!(!get_stream_unsupported(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!get_stream_unsupported(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!get_stream_unsupported(StatusCode::UNAUTHORIZED));
+    }
 }

@@ -1159,4 +1159,132 @@ mod tests {
         assert!(!get_stream_unsupported(StatusCode::SERVICE_UNAVAILABLE));
         assert!(!get_stream_unsupported(StatusCode::UNAUTHORIZED));
     }
+
+    /// Minimal HTTP/1.1 MCP server. GET -> 405. POST initialize -> result plus
+    /// `Mcp-Session-Id: sess-123`. Any other POST -> 400 unless it carries that header.
+    /// Records (method, session header) of every POST.
+    async fn spawn_session_server(
+    ) -> (String, Arc<parking_lot::Mutex<Vec<(String, Option<String>)>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let seen: Arc<parking_lot::Mutex<Vec<(String, Option<String>)>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let seen_task = seen.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let seen = seen_task.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head, body) = loop {
+                        let n = sock.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+                            let len = head
+                                .lines()
+                                .find_map(|l| {
+                                    let l = l.to_ascii_lowercase();
+                                    l.strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                                })
+                                .unwrap_or(0);
+                            if buf.len() >= pos + 4 + len {
+                                let body = buf[pos + 4..pos + 4 + len].to_vec();
+                                break (head, body);
+                            }
+                        }
+                    };
+
+                    let reply = if head.starts_with("GET ") {
+                        "HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            .to_string()
+                    } else {
+                        let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                        let method = req["method"].as_str().unwrap_or("").to_string();
+                        let session = head.lines().find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.trim()
+                                .eq_ignore_ascii_case("mcp-session-id")
+                                .then(|| v.trim().to_string())
+                        });
+                        seen.lock().push((method.clone(), session.clone()));
+                        let payload =
+                            json!({"jsonrpc":"2.0","id":req["id"],"result":{"ok":true}}).to_string();
+                        if method == "initialize" {
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nmcp-session-id: sess-123\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                                payload.len(),
+                                payload
+                            )
+                        } else if session.as_deref() == Some("sess-123") {
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                                payload.len(),
+                                payload
+                            )
+                        } else {
+                            let msg = "Bad Request: Missing session ID";
+                            format!(
+                                "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                                msg.len(),
+                                msg
+                            )
+                        }
+                    };
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+
+        (url, seen)
+    }
+
+    // Catches: the transport dropping the Mcp-Session-Id returned by initialize, so every later
+    // POST gets 400 "Missing session ID" from FastMCP servers (google_workspace_mcp)
+    #[tokio::test]
+    async fn test_sends_session_id_from_initialize_on_later_requests() {
+        let (url, seen) = spawn_session_server().await;
+        let transport = SseTransport::connect(url, HashMap::new())
+            .await
+            .expect("connect should succeed when the GET stream is unsupported (405)");
+
+        let init = JsonRpcRequest::new(
+            Some(json!(1)),
+            "initialize".to_string(),
+            Some(json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            })),
+        );
+        transport
+            .send_request(init)
+            .await
+            .expect("initialize should succeed");
+
+        let list = JsonRpcRequest::new(Some(json!(2)), "tools/list".to_string(), None);
+        let resp = transport
+            .send_request(list)
+            .await
+            .expect("request after initialize must carry Mcp-Session-Id and succeed");
+        assert_eq!(resp.result, Some(json!({"ok": true})));
+
+        let seen = seen.lock().clone();
+        assert_eq!(
+            seen,
+            vec![
+                ("initialize".to_string(), None),
+                ("tools/list".to_string(), Some("sess-123".to_string())),
+            ]
+        );
+    }
 }

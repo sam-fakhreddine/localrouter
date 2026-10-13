@@ -406,18 +406,25 @@ impl McpGateway {
         // Look up tool in session mapping to get server_id (UUID) and original_name
         // The mapping stores: namespaced_name -> (server_id, original_name)
         // where namespaced_name uses human-readable server name but server_id is the UUID for routing
-        let session_read = session.read().await;
-        let (server_id, original_name) = match session_read.tool_mapping.get(&tool_name) {
-            Some((id, name)) => (id.clone(), name.clone()),
+        let mut mapped = session.read().await.tool_mapping.get(&tool_name).cloned();
+        if mapped.is_none() {
+            // MCP clients may call a tool without listing first (Faheem's voice turns skip
+            // the list), so populate the mapping the same way tools/list does, once.
+            let list_request =
+                JsonRpcRequest::new(request.id.clone(), "tools/list".to_string(), None);
+            self.handle_tools_list(session.clone(), list_request)
+                .await?;
+            mapped = session.read().await.tool_mapping.get(&tool_name).cloned();
+        }
+        let (server_id, original_name) = match mapped {
+            Some((id, name)) => (id, name),
             None => {
-                drop(session_read);
                 return Ok(JsonRpcResponse::error(
                     request.id.unwrap_or(Value::Null),
                     JsonRpcError::tool_not_found(&tool_name),
                 ));
             }
         };
-        drop(session_read);
 
         // Firewall check for MCP tools
         // Pass both namespaced name (for session tracking/display) and original name (for permission lookup)

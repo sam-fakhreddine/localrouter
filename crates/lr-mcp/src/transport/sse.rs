@@ -1193,14 +1193,14 @@ mod tests {
     /// Minimal HTTP/1.1 MCP server. GET -> 405. POST initialize -> result plus
     /// `Mcp-Session-Id: sess-123`. Any other POST -> 400 unless it carries that header.
     /// Records (method, session header) of every POST.
-    async fn spawn_session_server(
-    ) -> (String, Arc<parking_lot::Mutex<Vec<(String, Option<String>)>>>) {
+    type SeenPosts = Arc<parking_lot::Mutex<Vec<(String, Option<String>)>>>;
+
+    async fn spawn_session_server() -> (String, SeenPosts) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
-        let seen: Arc<parking_lot::Mutex<Vec<(String, Option<String>)>>> =
-            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let seen: SeenPosts = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let seen_task = seen.clone();
 
         tokio::spawn(async move {

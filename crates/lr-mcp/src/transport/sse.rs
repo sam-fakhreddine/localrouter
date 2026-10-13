@@ -89,6 +89,19 @@ pub struct SseTransport {
     stream_task: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
+/// True when a status on the opening GET means the server has no GET SSE stream.
+/// FastMCP servers (e.g. google_workspace_mcp) answer the opening GET, sent before
+/// any session exists, with 400 (missing session id). That means the same as 405:
+/// no GET stream, use inline POST responses.
+fn get_stream_unsupported(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::METHOD_NOT_ALLOWED
+            | reqwest::StatusCode::NOT_FOUND
+            | reqwest::StatusCode::BAD_REQUEST
+    )
+}
+
 /// Derive the standard MCP HTTP headers for an outgoing POST (SEP-2243).
 ///
 /// `MCP-Protocol-Version` reflects the revision declared in the request's
@@ -376,23 +389,14 @@ impl SseTransport {
             if !response.status().is_success() {
                 let status = response.status();
 
-                // 405 Method Not Allowed means the server doesn't support GET SSE streams
-                // This is a permanent failure - the server only supports POST (inline responses)
-                // Mark as ready anyway so POST requests work, then exit the SSE stream task
-                if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+                // No GET SSE stream is a permanent failure: the server only supports
+                // POST (inline responses). Mark as ready anyway so POST requests work,
+                // then exit the SSE stream task.
+                if get_stream_unsupported(status) {
                     tracing::info!(
-                        "Server at {} doesn't support GET SSE stream (405). Transport will use inline responses only. Server-initiated notifications won't be received.",
-                        url
-                    );
-                    *stream_ready.write() = true;
-                    break;
-                }
-
-                // 404 Not Found also means no SSE endpoint exists - don't retry
-                if status == reqwest::StatusCode::NOT_FOUND {
-                    tracing::info!(
-                        "SSE endpoint not found at {} (404). Transport will use inline responses only.",
-                        url
+                        "Server at {} has no GET SSE stream ({}). Transport will use inline responses only.",
+                        url,
+                        status
                     );
                     *stream_ready.write() = true;
                     break;

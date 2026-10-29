@@ -5,3 +5,4 @@
 //! as a small web API and page, reachable only by the owner.
 
 pub mod approvals;
+pub mod skills;

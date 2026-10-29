@@ -423,6 +423,9 @@ async fn main() -> anyhow::Result<()> {
     let gateway = server_manager
         .get_mcp_gateway()
         .context("MCP gateway is not available after server start")?;
+    // Serve AgentSkills through the gateway; the manager lives as long as main
+    let _skill_manager = lr_headless::skills::register(&gateway, &config_manager.get());
+
     let app = lr_headless::approvals::router(gateway.firewall_manager.clone(), owner_login);
     let listener = tokio::net::TcpListener::bind(&approvals_addr)
         .await

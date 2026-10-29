@@ -1962,6 +1962,67 @@ impl McpGateway {
         }
     }
 
+    /// Index the virtual servers' catalog entries (skills) into the session's
+    /// context-mode store. Used when a client has no started MCP servers, which
+    /// skips the full catalog indexing in `handle_initialize`.
+    async fn index_virtual_catalogs(&self, session: &Arc<RwLock<GatewaySession>>) {
+        let (store, entries) = {
+            let session_read = session.read().await;
+            let store = match session_read
+                .virtual_server_state
+                .get("_context_mode")
+                .and_then(|state| {
+                    state
+                        .as_any()
+                        .downcast_ref::<super::context_mode::ContextModeSessionState>()
+                }) {
+                Some(cm) if cm.enabled => cm.store.clone(),
+                _ => return,
+            };
+            let mut entries: Vec<(String, String)> = Vec::new();
+            for vs in self.virtual_servers.read().iter() {
+                if let Some(state) = session_read.virtual_server_state.get(vs.id()) {
+                    entries.extend(vs.catalog_index_entries(state.as_ref()));
+                }
+            }
+            (store, entries)
+        };
+        if entries.is_empty() {
+            return;
+        }
+
+        let labels: Vec<String> = entries.iter().map(|(label, _)| label.clone()).collect();
+        let indexing = tokio::task::spawn_blocking(move || {
+            for (label, content) in &entries {
+                if let Err(e) = store.index(label, content) {
+                    tracing::warn!("Failed to index virtual catalog entry {}: {}", label, e);
+                }
+            }
+        })
+        .await;
+        if let Err(e) = indexing {
+            tracing::warn!("Virtual catalog indexing panicked: {}", e);
+            return;
+        }
+
+        let mut session_write = session.write().await;
+        if let Some(cm_state) = session_write
+            .virtual_server_state
+            .get_mut("_context_mode")
+            .and_then(|state| {
+                state
+                    .as_any_mut()
+                    .downcast_mut::<super::context_mode::ContextModeSessionState>()
+            })
+        {
+            for label in labels {
+                cm_state
+                    .catalog_sources
+                    .insert(label, super::context_mode::CatalogItemType::Skill);
+            }
+        }
+    }
+
     /// Handle initialize request
     async fn handle_initialize(
         &self,
@@ -2034,6 +2095,8 @@ impl McpGateway {
                     start_failures.len()
                 );
             }
+
+            self.index_virtual_catalogs(&session).await;
 
             let virtual_instructions = self.collect_virtual_instructions(&session).await;
             let unavailable = self.build_unavailable_server_infos(&start_failures);

@@ -18,7 +18,10 @@
 //! virtual server on `gateway`, and returns the manager so the caller can keep
 //! it alive. Call it before the gateway is put in an `Arc`.
 
-use lr_config::{AppConfig, ConfigManager, PermissionState, SkillsPermissions};
+use lr_config::{
+    AppConfig, ConfigManager, ContextManagementConfig, ContextManagementOverrides,
+    GatewayIndexingPermissions, IndexingState, PermissionState, SkillsPermissions,
+};
 use lr_mcp::gateway::{GatewayConfig, McpGateway};
 use lr_mcp::protocol::JsonRpcRequest;
 use lr_mcp::McpServerManager;
@@ -36,7 +39,19 @@ fn scratch_dir(label: &str) -> PathBuf {
     dir
 }
 
-/// <root>/quokka-guide/{SKILL.md, references/note.md}; returns <root>.
+/// Write <root>/<name>/SKILL.md with the given description and body.
+fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
+    let skill = root.join(name);
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: \"{description}\"\n---\n{body}\n"),
+    )
+    .unwrap();
+}
+
+/// <root>/quokka-guide/{SKILL.md, references/note.md} plus an unrelated
+/// <root>/emu-gardening/SKILL.md; returns <root>.
 fn write_fixture_skill(label: &str) -> PathBuf {
     let root = scratch_dir(label);
     let skill = root.join("quokka-guide");
@@ -49,12 +64,53 @@ fn write_fixture_skill(label: &str) -> PathBuf {
     )
     .unwrap();
     std::fs::write(skill.join("references").join("note.md"), NOTE_TEXT).unwrap();
+    write_skill(
+        &root,
+        "emu-gardening",
+        "Pruning shrubs and watering ferns",
+        "# Emu Gardening\n\nWater the ferns at dawn.",
+    );
     root
 }
 
+/// The context_management block of infra/mcp-gateway/settings.yaml: all
+/// indexing switched off.
+fn production_context_management() -> ContextManagementConfig {
+    ContextManagementConfig {
+        gateway_indexing: GatewayIndexingPermissions {
+            global: IndexingState::Disable,
+            ..Default::default()
+        },
+        virtual_indexing: GatewayIndexingPermissions {
+            global: IndexingState::Disable,
+            ..Default::default()
+        },
+        client_tools_indexing_default: IndexingState::Disable,
+        ..Default::default()
+    }
+}
+
+/// With all indexing off, context management is off for a client unless the
+/// client turns it on (an override), which is what "context management on"
+/// means under the production config.
+fn cm_on() -> Option<ContextManagementOverrides> {
+    Some(ContextManagementOverrides {
+        context_management_enabled: Some(true),
+        catalog_compression_enabled: None,
+    })
+}
+
 fn build_gateway(skills_root: &Path) -> Arc<McpGateway> {
+    build_gateway_with(skills_root, ContextManagementConfig::default())
+}
+
+fn build_gateway_with(
+    skills_root: &Path,
+    context_management: ContextManagementConfig,
+) -> Arc<McpGateway> {
     let mut config = AppConfig::default();
     config.skills.paths = vec![skills_root.to_string_lossy().to_string()];
+    config.context_management = context_management;
 
     let work = scratch_dir("router");
     let config_manager = Arc::new(ConfigManager::new(
@@ -92,6 +148,7 @@ async fn send(
     gateway: &McpGateway,
     client_id: &str,
     perms: &SkillsPermissions,
+    cm: &Option<ContextManagementOverrides>,
     req: JsonRpcRequest,
 ) -> Value {
     let resp = gateway
@@ -106,7 +163,7 @@ async fn send(
             PermissionState::Off,
             PermissionState::Off,
             None,
-            None,
+            cm.clone(),
             PermissionState::default(),
             PermissionState::default(),
             None,
@@ -119,7 +176,12 @@ async fn send(
     resp.result.expect("response should have a result")
 }
 
-async fn init_session(gateway: &McpGateway, client_id: &str, perms: &SkillsPermissions) {
+async fn init_session(
+    gateway: &McpGateway,
+    client_id: &str,
+    perms: &SkillsPermissions,
+    cm: &Option<ContextManagementOverrides>,
+) {
     let init = JsonRpcRequest::with_id(
         0,
         "initialize".to_string(),
@@ -129,12 +191,17 @@ async fn init_session(gateway: &McpGateway, client_id: &str, perms: &SkillsPermi
             "clientInfo": {"name": "test", "version": "1.0"}
         })),
     );
-    send(gateway, client_id, perms, init).await;
+    send(gateway, client_id, perms, cm, init).await;
 }
 
-async fn tool_names(gateway: &McpGateway, client_id: &str, perms: &SkillsPermissions) -> Vec<String> {
+async fn tool_names(
+    gateway: &McpGateway,
+    client_id: &str,
+    perms: &SkillsPermissions,
+    cm: &Option<ContextManagementOverrides>,
+) -> Vec<String> {
     let req = JsonRpcRequest::with_id(1, "tools/list".to_string(), Some(json!({})));
-    let result = send(gateway, client_id, perms, req).await;
+    let result = send(gateway, client_id, perms, cm, req).await;
     result["tools"]
         .as_array()
         .expect("tools array")
@@ -143,35 +210,82 @@ async fn tool_names(gateway: &McpGateway, client_id: &str, perms: &SkillsPermiss
         .collect()
 }
 
-async fn skill_read(
+async fn call_tool(
     gateway: &McpGateway,
     client_id: &str,
     perms: &SkillsPermissions,
+    cm: &Option<ContextManagementOverrides>,
+    name: &str,
     arguments: Value,
 ) -> String {
     let req = JsonRpcRequest::with_id(
         2,
         "tools/call".to_string(),
-        Some(json!({"name": "SkillRead", "arguments": arguments})),
+        Some(json!({"name": name, "arguments": arguments})),
     );
-    let result = send(gateway, client_id, perms, req).await;
+    let result = send(gateway, client_id, perms, cm, req).await;
     result["content"][0]["text"]
         .as_str()
         .expect("text content")
         .to_string()
 }
 
+async fn skill_read(
+    gateway: &McpGateway,
+    client_id: &str,
+    perms: &SkillsPermissions,
+    cm: &Option<ContextManagementOverrides>,
+    arguments: Value,
+) -> String {
+    call_tool(gateway, client_id, perms, cm, "SkillRead", arguments).await
+}
+
+/// IndexSearch over the skills catalog, polling for at most 5 s until the
+/// reply contains `wait_for` (indexing may lag the first request).
+async fn search_skills(
+    gateway: &McpGateway,
+    client_id: &str,
+    perms: &SkillsPermissions,
+    cm: &Option<ContextManagementOverrides>,
+    query: &str,
+    wait_for: &str,
+) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let text = call_tool(
+            gateway,
+            client_id,
+            perms,
+            cm,
+            "IndexSearch",
+            json!({"queries": [query], "source": "catalog:skills"}),
+        )
+        .await;
+        if text.contains(wait_for) || std::time::Instant::now() >= deadline {
+            return text;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 #[tokio::test]
 async fn lists_skill_read_for_client_with_skills_permission() {
-    // Catches: headless gateway never registers the skills virtual server, so tools/list returns no SkillRead
+    // Catches: headless gateway registers only the skills server, so a context-managed client sees SkillRead but no IndexSearch/IndexRead
     let root = write_fixture_skill("list");
     let gateway = build_gateway(&root);
     let perms = allow_all();
-    init_session(&gateway, "client-list", &perms).await;
+    init_session(&gateway, "client-list", &perms, &None).await;
 
-    let names = tool_names(&gateway, "client-list", &perms).await;
+    let names = tool_names(&gateway, "client-list", &perms, &None).await;
 
-    assert_eq!(names, vec!["SkillRead".to_string()]);
+    assert_eq!(
+        names,
+        vec![
+            "SkillRead".to_string(),
+            "IndexSearch".to_string(),
+            "IndexRead".to_string()
+        ]
+    );
 }
 
 #[tokio::test]
@@ -180,9 +294,9 @@ async fn skill_read_returns_skill_md_body() {
     let root = write_fixture_skill("body");
     let gateway = build_gateway(&root);
     let perms = allow_all();
-    init_session(&gateway, "client-body", &perms).await;
+    init_session(&gateway, "client-body", &perms, &None).await;
 
-    let text = skill_read(&gateway, "client-body", &perms, json!({"name": "quokka-guide"})).await;
+    let text = skill_read(&gateway, "client-body", &perms, &None, json!({"name": "quokka-guide"})).await;
 
     assert!(
         text.contains(SKILL_BODY_LINE),
@@ -196,12 +310,13 @@ async fn skill_read_with_path_returns_reference_file() {
     let root = write_fixture_skill("file");
     let gateway = build_gateway(&root);
     let perms = allow_all();
-    init_session(&gateway, "client-file", &perms).await;
+    init_session(&gateway, "client-file", &perms, &None).await;
 
     let text = skill_read(
         &gateway,
         "client-file",
         &perms,
+        &None,
         json!({"name": "quokka-guide", "path": "references/note.md"}),
     )
     .await;
@@ -215,12 +330,78 @@ async fn client_without_skills_permission_sees_no_skills_tool() {
     let root = write_fixture_skill("denied");
     let gateway = build_gateway(&root);
     let perms = SkillsPermissions::default();
-    init_session(&gateway, "client-denied", &perms).await;
+    init_session(&gateway, "client-denied", &perms, &None).await;
 
-    let names = tool_names(&gateway, "client-denied", &perms).await;
+    let names = tool_names(&gateway, "client-denied", &perms, &None).await;
 
     assert!(
         !names.iter().any(|n| n == "SkillRead"),
         "SkillRead leaked to client without permission: {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn index_search_finds_skill_by_description() {
+    // Catches: IndexSearch over catalog:skills misses a skill whose description matches, or returns an unrelated skill
+    let root = write_fixture_skill("search");
+    let gateway = build_gateway(&root);
+    let perms = allow_all();
+    init_session(&gateway, "client-search", &perms, &None).await;
+    tool_names(&gateway, "client-search", &perms, &None).await;
+
+    let text = search_skills(&gateway, "client-search", &perms, &None, "procedure", "quokka-guide").await;
+
+    assert!(text.contains("quokka-guide"), "quokka-guide missing from: {text}");
+    assert!(
+        !text.contains("emu-gardening"),
+        "unrelated skill returned: {text}"
+    );
+}
+
+#[tokio::test]
+async fn index_search_finds_skill_under_production_context_config() {
+    // Catches: production context_management (all indexing disabled) leaves the skills catalog unsearchable
+    let root = write_fixture_skill("search-prod");
+    let gateway = build_gateway_with(&root, production_context_management());
+    let perms = allow_all();
+    let cm = cm_on();
+    init_session(&gateway, "client-search-prod", &perms, &cm).await;
+    tool_names(&gateway, "client-search-prod", &perms, &cm).await;
+
+    let text = search_skills(&gateway, "client-search-prod", &perms, &cm, "procedure", "quokka-guide").await;
+
+    assert!(text.contains("quokka-guide"), "quokka-guide missing from: {text}");
+    assert!(
+        !text.contains("emu-gardening"),
+        "unrelated skill returned: {text}"
+    );
+}
+
+#[tokio::test]
+async fn skill_read_long_body_is_not_compressed_under_production_config() {
+    // Catches: context management compresses a long SkillRead reply into a preview plus an IndexRead pointer
+    let root = write_fixture_skill("long");
+    let mut body = String::from("# Long Scroll\n\n");
+    for i in 0..120 {
+        body.push_str(&format!("Step {i}: unroll the scroll a little further.\n"));
+    }
+    body.push_str("FINAL-LINE-ZEBRA-CROSSING");
+    assert!(body.len() > 2000);
+    write_skill(&root, "long-scroll", "A very long scroll of steps", &body);
+    let gateway = build_gateway_with(&root, production_context_management());
+    let perms = allow_all();
+    let cm = cm_on();
+    init_session(&gateway, "client-long", &perms, &cm).await;
+    tool_names(&gateway, "client-long", &perms, &cm).await;
+
+    let text = skill_read(&gateway, "client-long", &perms, &cm, json!({"name": "long-scroll"})).await;
+
+    assert!(
+        text.contains("FINAL-LINE-ZEBRA-CROSSING"),
+        "last body line missing from: {text}"
+    );
+    assert!(
+        !text.contains("IndexRead"),
+        "reply carries an IndexRead pointer: {text}"
     );
 }

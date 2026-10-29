@@ -1,10 +1,13 @@
 //! AgentSkills for the headless server.
 //!
 //! Port of the skills wiring in the desktop app's `src-tauri/src/main.rs`,
-//! without the Tauri parts (event sinks, managed state, marketplace). There is
-//! no embedding model here, so there is no vector search.
+//! without the Tauri parts (event sinks, managed state, marketplace). The
+//! context-mode server (IndexSearch/IndexRead) is registered after the skills
+//! server, so clients can search the skills catalog. There is no embedding
+//! model here, so there is no vector search.
 
 use lr_config::AppConfig;
+use lr_mcp::gateway::context_mode::ContextModeVirtualServer;
 use lr_mcp::gateway::virtual_skills::SkillsVirtualServer;
 use lr_mcp::gateway::McpGateway;
 use lr_skills::{SkillManager, SkillWatcher};
@@ -12,7 +15,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 /// Scan the configured skill paths, watch them for changes, and register the
-/// skills virtual server on `gateway`.
+/// skills and context-mode virtual servers on `gateway`.
 ///
 /// An empty `skills.paths` is fine: no skills are found and nothing fails.
 /// The returned manager is also held by the registered skills server; the
@@ -48,12 +51,15 @@ pub fn register(gateway: &McpGateway, config: &AppConfig) -> Arc<SkillManager> {
 
     gateway.register_virtual_server(Arc::new(SkillsVirtualServer::new(
         skill_manager.clone(),
-        context_management,
+        context_management.clone(),
         skills_config,
     )));
-    // The context-mode server (IndexSearch/IndexRead) is not registered: it is
-    // on by default and would add two tools next to SkillRead, which the
-    // headless skills test pins to exactly ["SkillRead"].
+    // Registered after the skills server, as in the desktop app. No embedding
+    // service is set (headless has no embedding model), so vector search stays
+    // off and IndexSearch uses keyword search only.
+    gateway.register_virtual_server(Arc::new(ContextModeVirtualServer::new(
+        context_management,
+    )));
     info!("Skills system initialized");
 
     skill_manager

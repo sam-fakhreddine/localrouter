@@ -18,7 +18,13 @@ pub struct GatewaySession {
     /// Session key (SSE connection UUID for SSE, client_id for non-SSE)
     pub session_key: String,
 
-    /// List of MCP servers this client is allowed to access
+    /// Servers the session was created for (sorted). Compared against each
+    /// request's server list to detect permission/config changes; unlike
+    /// `allowed_servers` it is not narrowed when a server fails to start.
+    pub requested_servers: Vec<String>,
+
+    /// Servers this session currently routes to: the requested servers minus
+    /// any that failed to start.
     pub allowed_servers: Vec<String>,
 
     /// Initialization status for each server
@@ -164,9 +170,13 @@ impl GatewaySession {
             server_init_status.insert(server_id.clone(), InitStatus::NotStarted);
         }
 
+        let mut requested_servers = allowed_servers.clone();
+        requested_servers.sort();
+
         Self {
             session_key: client_id.clone(), // default; overridden by gateway for SSE
             client_id,
+            requested_servers,
             allowed_servers,
             server_init_status,
             merged_capabilities: None,

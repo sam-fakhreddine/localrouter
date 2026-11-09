@@ -1008,8 +1008,10 @@ impl McpGateway {
         allowed_servers: Vec<String>,
         roots: Vec<crate::protocol::Root>,
     ) -> AppResult<Arc<RwLock<GatewaySession>>> {
-        // Check if session exists
-        if let Some(session) = self.sessions.get(session_key) {
+        // Check if session exists (clone the Arc out: holding the DashMap
+        // entry across the awaits below would block the shard)
+        let existing = self.sessions.get(session_key).map(|s| s.value().clone());
+        if let Some(session) = existing {
             let session_read = session.read().await;
 
             // Check if expired
@@ -1028,11 +1030,12 @@ impl McpGateway {
                 // Check if allowed servers changed (e.g. switching between direct/all modes)
                 // If so, drop the stale session and create a fresh one since cached state
                 // (tool mappings, init statuses, etc.) is tied to the server list
+                // Compare against the requested set, not `allowed_servers`:
+                // the latter drops servers that failed to start, and comparing
+                // against it would rebuild the session on every request.
                 let mut servers_sorted = allowed_servers.clone();
                 servers_sorted.sort();
-                let mut existing_sorted = session_read.allowed_servers.clone();
-                existing_sorted.sort();
-                let servers_changed = servers_sorted != existing_sorted;
+                let servers_changed = servers_sorted != session_read.requested_servers;
                 // Clone transports before dropping the read lock
                 let transports = if servers_changed {
                     session_read.transports.clone()

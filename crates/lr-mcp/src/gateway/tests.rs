@@ -492,3 +492,171 @@ for line in sys.stdin:
         assert_eq!(err.message, "Tool not found: web__no_such_tool");
     }
 }
+
+/// INFRA-962: a server that fails to start must not make every later request
+/// in the session rebuild it.
+#[cfg(test)]
+mod session_churn_tests {
+    use crate::gateway::types::GatewayConfig;
+    use crate::gateway::McpGateway;
+    use crate::manager::McpServerManager;
+    use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+    use lr_config::{
+        AppConfig, ConfigManager, McpServerConfig, McpTransportConfig, McpTransportType,
+    };
+    use lr_providers::registry::ProviderRegistry;
+    use lr_router::free_tier::FreeTierManager;
+    use lr_router::rate_limit::RateLimiterManager;
+    use lr_router::Router;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    // Appends one line to the counter file each time the process starts.
+    const UPSTREAM_PY: &str = r#"
+import sys, json
+with open(sys.argv[1], "a") as f:
+    f.write("start\n")
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if "id" not in msg:
+        continue
+    if method == "initialize":
+        res = {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "1"}}
+    elif method == "tools/list":
+        res = {"tools": [{"name": "web_search", "description": "search", "inputSchema": {"type": "object", "properties": {}}}]}
+    elif method == "tools/call":
+        res = {"content": [{"type": "text", "text": "upstream-result:" + msg["params"]["name"]}], "isError": False}
+    else:
+        res = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}) + "\n")
+    sys.stdout.flush()
+"#;
+
+    struct Env {
+        gateway: Arc<McpGateway>,
+        web_id: String,
+        down_id: String,
+        starts_file: PathBuf,
+    }
+
+    fn setup() -> Env {
+        let dir = std::env::temp_dir().join(format!("lr-churn-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("upstream.py");
+        std::fs::write(&script, UPSTREAM_PY).unwrap();
+        let starts_file = dir.join("starts.txt");
+
+        let manager = Arc::new(McpServerManager::new_for_test());
+        let web = McpServerConfig::new(
+            "web".to_string(),
+            McpTransportType::Stdio,
+            McpTransportConfig::Stdio {
+                command: format!("python3 -u {} {}", script.display(), starts_file.display()),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+        );
+        // A server that never starts, like github while gh-token-proxy is down.
+        let down = McpServerConfig::new(
+            "down".to_string(),
+            McpTransportType::Stdio,
+            McpTransportConfig::Stdio {
+                command: "/nonexistent/lr-churn-server".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+        );
+        let web_id = web.id.clone();
+        let down_id = down.id.clone();
+        manager.add_config(web);
+        manager.add_config(down);
+
+        let config_manager = Arc::new(ConfigManager::new(
+            AppConfig::default(),
+            dir.join("config.yaml"),
+        ));
+        let metrics_db = Arc::new(
+            lr_monitoring::storage::MetricsDatabase::new(dir.join("metrics")).unwrap(),
+        );
+        let metrics = Arc::new(lr_monitoring::metrics::MetricsCollector::new(metrics_db));
+        let router = Arc::new(Router::new(
+            config_manager,
+            Arc::new(ProviderRegistry::new()),
+            Arc::new(RateLimiterManager::new(None)),
+            metrics,
+            Arc::new(FreeTierManager::new(None)),
+        ));
+        let gateway = Arc::new(McpGateway::new(manager, GatewayConfig::default(), router));
+        Env { gateway, web_id, down_id, starts_file }
+    }
+
+    async fn send(
+        gateway: &McpGateway,
+        session: &str,
+        servers: Vec<String>,
+        id: Option<u64>,
+        method: &str,
+        params: Option<Value>,
+    ) -> JsonRpcResponse {
+        let request = JsonRpcRequest::new(id.map(|i| json!(i)), method.to_string(), params);
+        gateway
+            .handle_request(session, servers, vec![], request)
+            .await
+            .expect("gateway request failed")
+    }
+
+    async fn init(gateway: &McpGateway, session: &str, servers: Vec<String>) {
+        let r = send(
+            gateway,
+            session,
+            servers.clone(),
+            Some(1),
+            "initialize",
+            Some(json!({"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})),
+        )
+        .await;
+        assert!(r.error.is_none(), "initialize failed: {:?}", r.error);
+        send(gateway, session, servers, None, "notifications/initialized", None).await;
+    }
+
+    fn starts(env: &Env) -> usize {
+        std::fs::read_to_string(&env.starts_file)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    // Catches: the session being rebuilt on every request because the gateway
+    // compares the request's server list with the started subset (the failed
+    // server dropped), so the working upstream is restarted again and again.
+    #[tokio::test]
+    async fn failed_server_does_not_rebuild_session_on_each_request() {
+        let env = setup();
+        let servers = vec![env.web_id.clone(), env.down_id.clone()];
+        init(&env.gateway, "client-churn", servers.clone()).await;
+
+        for id in 2..5u64 {
+            let r = send(
+                &env.gateway,
+                "client-churn",
+                servers.clone(),
+                Some(id),
+                "tools/call",
+                Some(json!({"name": "web__web_search", "arguments": {}})),
+            )
+            .await;
+            assert!(r.error.is_none(), "unexpected error: {:?}", r.error);
+            let text = r.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+            assert_eq!(text, "upstream-result:web_search");
+        }
+
+        assert_eq!(starts(&env), 1);
+    }
+}

@@ -157,10 +157,14 @@ impl McpGateway {
         // Check cache
         if let Some(cached) = &session_read.cached_tools {
             if cached.is_valid() {
-                let filtered = apply_catalog_compression_tools(
-                    &cached.data,
-                    session_read.catalog_compression.as_ref(),
-                    session_read.activated_tools(),
+                let filtered = hide_off_tools(
+                    apply_catalog_compression_tools(
+                        &cached.data,
+                        session_read.catalog_compression.as_ref(),
+                        session_read.activated_tools(),
+                    ),
+                    &session_read.client_id,
+                    &session_read.mcp_permissions,
                 );
                 let mut tools: Vec<serde_json::Value> = filtered
                     .iter()
@@ -210,10 +214,14 @@ impl McpGateway {
         } else {
             None
         };
-        let filtered = apply_catalog_compression_tools(
-            &tools,
-            session_read.catalog_compression.as_ref(),
-            session_read.activated_tools(),
+        let filtered = hide_off_tools(
+            apply_catalog_compression_tools(
+                &tools,
+                session_read.catalog_compression.as_ref(),
+                session_read.activated_tools(),
+            ),
+            &session_read.client_id,
+            &session_read.mcp_permissions,
         );
         let mut all_tools: Vec<serde_json::Value> = filtered
             .iter()
@@ -1395,6 +1403,30 @@ fn extract_server_slug(namespaced_name: &str) -> &str {
         .find(NAMESPACE_SEPARATOR)
         .map(|idx| &namespaced_name[..idx])
         .unwrap_or(namespaced_name)
+}
+
+/// LLM-1444: drop tools whose effective permission for this client is Off.
+///
+/// Resolves with `check_mcp_tool_access` (tool, then server, then global), the
+/// same call the tools/call firewall makes, so list and call cannot disagree.
+/// The internal test client bypasses the firewall on call, so it sees everything.
+/// Runs on every answer, never on the cache, so a permission change takes
+/// effect without invalidating the cached upstream list.
+pub(crate) fn hide_off_tools(
+    tools: Vec<NamespacedTool>,
+    client_id: &str,
+    perms: &lr_config::McpPermissions,
+) -> Vec<NamespacedTool> {
+    if client_id == "internal-test" {
+        return tools;
+    }
+    tools
+        .into_iter()
+        .filter(|t| {
+            access_control::check_mcp_tool_access(perms, &t.server_id, &t.original_name)
+                != access_control::AccessDecision::Deny
+        })
+        .collect()
 }
 
 /// Apply catalog compression plan to a tools list:

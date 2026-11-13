@@ -660,3 +660,166 @@ for line in sys.stdin:
         assert_eq!(starts(&env), 1);
     }
 }
+
+/// LLM-1444: tools/list must not offer tools the client's policy turns off.
+#[cfg(test)]
+mod off_tools_hidden_tests {
+    use crate::gateway::types::GatewayConfig;
+    use crate::gateway::McpGateway;
+    use crate::manager::McpServerManager;
+    use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+    use lr_config::{
+        AppConfig, ConfigManager, McpPermissions, McpServerConfig, McpTransportConfig,
+        McpTransportType, PermissionState,
+    };
+    use lr_providers::registry::ProviderRegistry;
+    use lr_router::free_tier::FreeTierManager;
+    use lr_router::rate_limit::RateLimiterManager;
+    use lr_router::Router;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const UPSTREAM_PY: &str = r#"
+import sys, json
+def tool(name):
+    return {"name": name, "description": name, "inputSchema": {"type": "object", "properties": {}}}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if "id" not in msg:
+        continue
+    if method == "initialize":
+        res = {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "1"}}
+    elif method == "tools/list":
+        res = {"tools": [tool("read_file"), tool("write_file"), tool("move_file")]}
+    else:
+        res = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}) + "\n")
+    sys.stdout.flush()
+"#;
+
+    struct Env {
+        gateway: McpGateway,
+        server_id: String,
+        perms: McpPermissions,
+    }
+
+    fn setup() -> Env {
+        let dir = std::env::temp_dir().join(format!("lr-off-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("upstream.py");
+        std::fs::write(&script, UPSTREAM_PY).unwrap();
+
+        let manager = Arc::new(McpServerManager::new_for_test());
+        let config = McpServerConfig::new(
+            "srv1".to_string(),
+            McpTransportType::Stdio,
+            McpTransportConfig::Stdio {
+                command: format!("python3 -u {}", script.display()),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+        );
+        let server_id = config.id.clone();
+        manager.add_config(config);
+
+        // Same key shape the call path resolves: "<server_id>__<original tool name>".
+        let mut tools = HashMap::new();
+        tools.insert(format!("{}__write_file", server_id), PermissionState::Off);
+        tools.insert(format!("{}__move_file", server_id), PermissionState::Ask);
+        tools.insert(format!("{}__read_file", server_id), PermissionState::Allow);
+        let perms = McpPermissions {
+            global: PermissionState::Allow,
+            tools,
+            ..Default::default()
+        };
+
+        let config_manager = Arc::new(ConfigManager::new(
+            AppConfig::default(),
+            dir.join("config.yaml"),
+        ));
+        let metrics_db = Arc::new(
+            lr_monitoring::storage::MetricsDatabase::new(dir.join("metrics")).unwrap(),
+        );
+        let metrics = Arc::new(lr_monitoring::metrics::MetricsCollector::new(metrics_db));
+        let router = Arc::new(Router::new(
+            config_manager,
+            Arc::new(ProviderRegistry::new()),
+            Arc::new(RateLimiterManager::new(None)),
+            metrics,
+            Arc::new(FreeTierManager::new(None)),
+        ));
+        let gateway = McpGateway::new(manager, GatewayConfig::default(), router);
+        Env { gateway, server_id, perms }
+    }
+
+    async fn send(
+        env: &Env,
+        id: Option<u64>,
+        method: &str,
+        params: Option<Value>,
+    ) -> JsonRpcResponse {
+        let request = JsonRpcRequest::new(id.map(|i| json!(i)), method.to_string(), params);
+        env.gateway
+            .handle_request_with_skills(
+                "client-off-tools",
+                None,
+                vec![env.server_id.clone()],
+                vec![],
+                env.perms.clone(),
+                lr_config::SkillsPermissions::default(),
+                String::new(),
+                PermissionState::Off,
+                PermissionState::Off,
+                None,
+                None,
+                PermissionState::default(),
+                PermissionState::default(),
+                None,
+                lr_config::ClientMode::default(),
+                request,
+                None,
+            )
+            .await
+            .expect("gateway request failed")
+    }
+
+    fn names(r: &JsonRpcResponse) -> Vec<String> {
+        assert!(r.error.is_none(), "unexpected error: {:?}", r.error);
+        r.result.as_ref().unwrap()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    // Catches: tools/list offering a tool the client's policy sets to off
+    // (calling it is refused), on the fresh fetch and on the cached answer,
+    // or hiding allow/ask tools along with it.
+    #[tokio::test]
+    async fn tools_list_hides_off_tools_and_keeps_allow_and_ask() {
+        let env = setup();
+        let r = send(
+            &env,
+            Some(1),
+            "initialize",
+            Some(json!({"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})),
+        )
+        .await;
+        assert!(r.error.is_none(), "initialize failed: {:?}", r.error);
+        send(&env, None, "notifications/initialized", None).await;
+
+        for id in 2..4u64 {
+            let listed = names(&send(&env, Some(id), "tools/list", None).await);
+            assert!(listed.contains(&"srv1__read_file".to_string()), "{:?}", listed);
+            assert!(listed.contains(&"srv1__move_file".to_string()), "{:?}", listed);
+            assert!(!listed.contains(&"srv1__write_file".to_string()), "{:?}", listed);
+        }
+    }
+}

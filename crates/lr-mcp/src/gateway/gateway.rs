@@ -2496,6 +2496,15 @@ impl McpGateway {
             .await
             .map(|(t, _)| t)
             .unwrap_or_default();
+        // LLM-1444: off tools stay out of the welcome text and the search index too.
+        let tools_catalog = {
+            let session_read = session.read().await;
+            super::gateway_tools::hide_off_tools(
+                tools_catalog,
+                &session_read.client_id,
+                &session_read.mcp_permissions,
+            )
+        };
 
         let resources_catalog = self
             .fetch_and_merge_resources(

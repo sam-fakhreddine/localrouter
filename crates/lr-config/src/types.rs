@@ -3556,6 +3556,12 @@ pub struct McpServerConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Per-server request timeout in seconds for calls to this server (for
+    /// example a tools/call that runs a long deploy). Unset keeps the transport
+    /// default (30 s for HTTP/SSE servers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
+
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
 }
@@ -4620,6 +4626,7 @@ impl McpServerConfig {
             discovered_oauth: None,
             oauth_config: None,
             enabled: true,
+            request_timeout_secs: None,
             created_at: Utc::now(),
         }
     }

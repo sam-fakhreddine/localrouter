@@ -496,6 +496,7 @@ pub async fn clone_mcp_server(
         discovered_oauth: source.discovered_oauth.clone(),
         oauth_config: source.oauth_config.clone(),
         enabled: source.enabled,
+        request_timeout_secs: source.request_timeout_secs,
         created_at: chrono::Utc::now(),
     };
 

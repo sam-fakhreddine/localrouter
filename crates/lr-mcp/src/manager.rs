@@ -719,7 +719,12 @@ impl McpServerManager {
         }
 
         // Connect to the SSE server
-        let transport = SseTransport::connect(url, headers).await?;
+        let transport = SseTransport::connect_with_request_timeout(
+            url,
+            headers,
+            crate::transport::sse::request_timeout_for(config),
+        )
+        .await?;
 
         // Set up notification callback
         let server_id_for_callback = server_id.to_string();
@@ -1104,7 +1109,12 @@ impl McpServerManager {
         self.apply_auth_headers(server_id, config, &mut headers)
             .await?;
 
-        let transport = SseTransport::connect(url, headers).await?;
+        let transport = SseTransport::connect_with_request_timeout(
+            url,
+            headers,
+            crate::transport::sse::request_timeout_for(config),
+        )
+        .await?;
         Ok(Arc::new(transport))
     }
 

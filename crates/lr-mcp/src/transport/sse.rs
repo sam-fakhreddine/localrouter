@@ -40,6 +40,18 @@ static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .expect("Failed to create global HTTP client")
 });
 
+/// Request timeout for an HTTP/SSE server that sets no `request_timeout_secs`.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The request timeout for an HTTP/SSE server: its `request_timeout_secs`
+/// from settings.yaml when set, otherwise [`DEFAULT_REQUEST_TIMEOUT`].
+pub fn request_timeout_for(config: &lr_config::McpServerConfig) -> Duration {
+    config
+        .request_timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT)
+}
+
 /// Notification callback type for SSE transport
 pub type SseNotificationCallback = Arc<dyn Fn(JsonRpcNotification) + Send + Sync>;
 
@@ -65,6 +77,10 @@ pub struct SseTransport {
 
     /// HTTP client for sending requests
     client: Client,
+
+    /// How long one request waits for its response, on the HTTP POST and on
+    /// the SSE stream. Overrides the shared client's own timeout per request.
+    request_timeout: Duration,
 
     /// Custom headers to include in requests
     headers: HashMap<String, String>,
@@ -216,6 +232,16 @@ impl SseTransport {
     /// * Returns an error if the HTTP client cannot be created
     /// * Returns an error if the server is not reachable or returns an error status
     pub async fn connect(url: String, headers: HashMap<String, String>) -> AppResult<Self> {
+        Self::connect_with_request_timeout(url, headers, DEFAULT_REQUEST_TIMEOUT).await
+    }
+
+    /// Like [`connect`](Self::connect), but every request waits up to
+    /// `request_timeout` for its response (HTTP POST and SSE stream wait).
+    pub async fn connect_with_request_timeout(
+        url: String,
+        headers: HashMap<String, String>,
+        request_timeout: Duration,
+    ) -> AppResult<Self> {
         tracing::info!("Connecting to MCP SSE server: {}", url);
 
         // Use shared HTTP client with connection pooling
@@ -304,6 +330,7 @@ impl SseTransport {
             message_endpoint,
             session_id,
             client,
+            request_timeout,
             headers,
             pending,
             next_id: Arc::new(RwLock::new(1)),
@@ -729,7 +756,11 @@ impl Transport for SseTransport {
                 .unwrap_or_else(|| self.url.clone());
 
             // Build POST request for notification (no ID added)
-            let mut req_builder = self.client.post(&post_url).json(&request);
+            let mut req_builder = self
+                .client
+                .post(&post_url)
+                .timeout(self.request_timeout)
+                .json(&request);
             req_builder = req_builder.header("Accept", "application/json, text/event-stream");
             for (key, value) in mcp_request_headers(&request) {
                 req_builder = req_builder.header(key, value);
@@ -797,7 +828,11 @@ impl Transport for SseTransport {
             .unwrap_or_else(|| self.url.clone());
 
         // Build POST request
-        let mut req_builder = self.client.post(&post_url).json(&request);
+        let mut req_builder = self
+            .client
+            .post(&post_url)
+            .timeout(self.request_timeout)
+            .json(&request);
 
         // Add Accept header for content negotiation
         req_builder = req_builder.header("Accept", "application/json, text/event-stream");
@@ -915,11 +950,12 @@ impl Transport for SseTransport {
 
         // No inline response - wait for response from SSE stream (with timeout)
         tracing::info!(
-            "SSE transport waiting for SSE stream response (internal_id={}, timeout=30s)",
-            request_id
+            "SSE transport waiting for SSE stream response (internal_id={}, timeout={}s)",
+            request_id,
+            self.request_timeout.as_secs()
         );
 
-        let mut response = tokio::time::timeout(Duration::from_secs(30), rx)
+        let mut response = tokio::time::timeout(self.request_timeout, rx)
             .await
             .map_err(|_| {
                 self.pending.write().remove(&request_id);
@@ -1112,6 +1148,7 @@ mod tests {
             message_endpoint: Arc::new(RwLock::new(None)),
             session_id: Arc::new(RwLock::new(None)),
             client: Client::new(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             headers: HashMap::new(),
             pending: Arc::new(RwLock::new(HashMap::new())),
             next_id: Arc::new(RwLock::new(1)),
@@ -1315,6 +1352,134 @@ mod tests {
                 ("initialize".to_string(), None),
                 ("tools/list".to_string(), Some("sess-123".to_string())),
             ]
+        );
+    }
+
+    /// MCP server whose GET answers 405 (no stream). Every POST either answers
+    /// inline after `delay`, or (when `delay` is None) answers 202 with no body
+    /// and never sends the response, so the transport waits on its stream.
+    async fn spawn_slow_server(delay: Option<Duration>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head, body) = loop {
+                        let n = sock.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+                            let len = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                                })
+                                .unwrap_or(0);
+                            if buf.len() >= pos + 4 + len {
+                                break (head, buf[pos + 4..pos + 4 + len].to_vec());
+                            }
+                        }
+                    };
+                    let reply = if head.starts_with("GET ") {
+                        "HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            .to_string()
+                    } else if let Some(delay) = delay {
+                        tokio::time::sleep(delay).await;
+                        let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                        let payload =
+                            json!({"jsonrpc":"2.0","id":req["id"],"result":{"done":true}})
+                                .to_string();
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        )
+                    } else {
+                        "HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            .to_string()
+                    };
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        url
+    }
+
+    // Catches: an HTTP/SSE server's configured request timeout being ignored, so a slow
+    // tools/call is cut by the fixed 30 s default (INFRA-1017: labops komodo_deploy)
+    // instead of the server's own limit, at the HTTP layer or the SSE stream wait.
+    #[tokio::test]
+    async fn test_configured_request_timeout_governs_tool_calls() {
+        // (server reply delay or None for "202, answer never comes", configured timeout, expect ok)
+        let cases: [(Option<u64>, u64, bool); 3] = [
+            (Some(2), 1, false), // inline reply slower than the configured timeout
+            (Some(2), 4, true),  // inline reply within a longer configured timeout
+            (None, 1, false),    // stream wait gives up at the configured timeout
+        ];
+        for (delay, configured, expect_ok) in cases {
+            let url = spawn_slow_server(delay.map(Duration::from_secs)).await;
+            let transport = SseTransport::connect_with_request_timeout(
+                url,
+                HashMap::new(),
+                Duration::from_secs(configured),
+            )
+            .await
+            .expect("connect should succeed when the GET stream is unsupported (405)");
+
+            let call = JsonRpcRequest::new(
+                Some(json!(7)),
+                "tools/call".to_string(),
+                Some(json!({"name": "komodo_deploy", "arguments": {}})),
+            );
+            let outcome = tokio::time::timeout(Duration::from_secs(6), transport.send_request(call))
+                .await
+                .map(|r| r.map(|resp| resp.result));
+            let got = match outcome {
+                Ok(Ok(result)) => format!("ok {}", result.unwrap_or(Value::Null)),
+                Ok(Err(_)) => "transport error".to_string(),
+                Err(_) => "still waiting after 6s".to_string(),
+            };
+            let want = if expect_ok {
+                "ok {\"done\":true}"
+            } else {
+                "transport error"
+            };
+            assert_eq!(
+                got, want,
+                "delay={:?}s configured={}s",
+                delay, configured
+            );
+        }
+    }
+
+    // Catches: request_timeout_secs in a server's settings.yaml entry not reaching the
+    // transport, or an unset value changing the 30 s default for other servers.
+    #[test]
+    fn test_request_timeout_read_from_server_config() {
+        let entry = |extra: &str| {
+            serde_json::from_str::<lr_config::McpServerConfig>(&format!(
+                r#"{{"id":"labops","name":"labops","transport":"http_sse",
+                    "transport_config":{{"type":"http_sse","url":"http://127.0.0.1:1/mcp"}},
+                    "created_at":"2026-11-13T00:00:00Z"{}}}"#,
+                extra
+            ))
+            .unwrap()
+        };
+        assert_eq!(request_timeout_for(&entry("")), Duration::from_secs(30));
+        assert_eq!(
+            request_timeout_for(&entry(r#","request_timeout_secs":600"#)),
+            Duration::from_secs(600)
         );
     }
 }

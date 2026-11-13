@@ -116,6 +116,7 @@ pub fn create_mcp_server_config(
         discovered_oauth: None,
         oauth_config: None,
         enabled: true,
+        request_timeout_secs: None,
         created_at: Utc::now(),
     })
 }

@@ -242,6 +242,7 @@ async fn setup_gateway_with_two_servers() -> (
         discovered_oauth: None,
         oauth_config: None,
         enabled: true,
+        request_timeout_secs: None,
         created_at: Utc::now(),
     };
 
@@ -257,6 +258,7 @@ async fn setup_gateway_with_two_servers() -> (
         discovered_oauth: None,
         oauth_config: None,
         enabled: true,
+        request_timeout_secs: None,
         created_at: Utc::now(),
     };
 
